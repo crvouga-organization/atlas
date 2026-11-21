@@ -40,9 +40,9 @@ commits. Jobs serialize publication; an outdated run publishes its SHA tag but l
 `main` commit, so a late run cannot roll it back. Manual dispatch and scheduled CI runs can retry a failed push.
 
 **Once, after the first image publish:** open the
-[GHCR package settings](https://github.com/users/crvouga/packages/container/atlas/settings) and
+[GHCR package settings](https://github.com/orgs/crvouga-organization/packages/container/atlas/settings) and
 set its visibility to **Public**, so Railway and other projects can pull it without registry credentials.
-Do the same for the separate [atlas-insecure package settings](https://github.com/users/crvouga/packages/container/atlas-insecure/settings)
+Do the same for the separate [atlas-insecure package settings](https://github.com/orgs/crvouga-organization/packages/container/atlas-insecure/settings)
 after its first publish.
 GHCR creates new packages as private even for a public source repository
 ([GitHub's registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#pushing-container-images)).

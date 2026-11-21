@@ -23,7 +23,9 @@ import { must, run } from '../process.ts';
 
 /** The checkout being released. The seed points this at its clean copy of origin/main. */
 export const root = process.env.ATLAS_RELEASE_ROOT ? path.resolve(process.env.ATLAS_RELEASE_ROOT) : path.join(import.meta.dirname, '../..');
-export const REPO = 'crvouga/atlas';
+export const REPO = 'crvouga-organization/atlas';
+/** npm scope/name prefix for this repo's packages (@crvouga/atlas*). */
+export const NPM_PROJECT = 'crvouga/atlas';
 /** npm Trusted Publishing is pinned to this workflow filename. */
 export const WORKFLOW_FILE = 'ci.yml';
 export const PLACEHOLDER_VERSION = '0.0.0-development';

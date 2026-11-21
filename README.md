@@ -106,7 +106,7 @@ ghcr.io/crvouga-organization/atlas:latest
 ```
 
 The image includes the Atlas server and viewer; hosting it needs no repository, Dockerfile, build command
-or package installation. [`latest` on GHCR](https://github.com/users/crvouga/packages/container/atlas) follows
+or package installation. [`latest` on GHCR](https://github.com/orgs/crvouga-organization/packages/container/atlas) follows
 the newest checked `main` image, independently of npm releases.
 
 1. Leave the start command unset. Add a long random secret as `ATLAS_TOKEN` (at least 12 characters;

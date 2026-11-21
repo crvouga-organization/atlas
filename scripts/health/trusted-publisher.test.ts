@@ -59,7 +59,7 @@ describe('publisherGap', () => {
         github({
           claims: {
             repository: 'crvouga-organization/atlas',
-            workflow_ref: 'crvouga/atlas/.github/workflows/ci.yml@refs/heads/main'
+            workflow_ref: 'crvouga-organization/atlas/.github/workflows/ci.yml@refs/heads/main'
           }
         })
       ])
@@ -127,7 +127,7 @@ describe('trustedPublisherReport', () => {
         '',
         'trusted publisher — 4 to fix',
         '',
-        'No GitHub Actions publisher for crvouga/atlas ci.yml. On the access page add one and allow npm publish. Organization crvouga, repository atlas, workflow filename ci.yml, environment empty.',
+        'No GitHub Actions publisher for crvouga-organization/atlas ci.yml. On the access page add one and allow npm publish. Organization crvouga-organization, repository atlas, workflow filename ci.yml, environment empty.',
         accessUrl('@crvouga/atlas-fullscript'),
         '',
         'GitHub Actions publisher does not allow npm publish (stage only). On the access page, allow npm publish.',

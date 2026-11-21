@@ -2,17 +2,17 @@
  * Trusted Publisher health for every npm package associated with this repo.
  *
  * Association is the logged-in account's packages whose registry repository is
- * crvouga/atlas, plus every public workspace package (including one that
+ * crvouga-organization/atlas (or its old name crvouga/atlas), plus every public workspace package (including one that
  * is not on npm yet). npm can only record a publisher on a package that already
  * exists, and direct `npm publish` from this repo's Release workflow needs a
- * GitHub Actions publisher for crvouga/atlas, workflow ci.yml, with no
+ * GitHub Actions publisher for crvouga-organization/atlas, workflow ci.yml, with no
  * environment and permission to publish (not stage-only). The fix is the
  * package access page.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { discoverPackages, REPO, root, WORKFLOW_FILE } from '../release/lib.ts';
+import { discoverPackages, NPM_PROJECT, REPO, root, WORKFLOW_FILE } from '../release/lib.ts';
 import type { HealthFinding, HealthGroup, HealthReport } from './report.ts';
 import { promptWebAuth, type WebChallenge, webChallenge } from './web-auth.ts';
 
@@ -48,7 +48,7 @@ export type PackageTrust = {
 export type PublisherGap = 'missing' | 'stage-only' | 'environment' | 'not-published';
 
 const GAP_SUMMARY: Record<PublisherGap, string> = {
-  missing: `No GitHub Actions publisher for ${REPO} ${WORKFLOW_FILE}. On the access page add one and allow npm publish. Organization crvouga, repository atlas, workflow filename ci.yml, environment empty.`,
+  missing: `No GitHub Actions publisher for ${REPO} ${WORKFLOW_FILE}. On the access page add one and allow npm publish. Organization crvouga-organization, repository atlas, workflow filename ci.yml, environment empty.`,
   'stage-only': 'GitHub Actions publisher does not allow npm publish (stage only). On the access page, allow npm publish.',
   environment: 'GitHub Actions publisher is limited to an environment. The Release workflow sets none. On the access page, clear Environment and allow npm publish.',
   'not-published': 'Not on npm yet, so there is no access page until the interactive first publish (bun scripts/release/seed.ts).'
@@ -68,7 +68,7 @@ export function registryPackagePath(name: string): string {
  * `.git` and a trailing path. A longer repo name such as `atlas-extra`
  * does not match.
  */
-const PROJECT_REPOSITORY = /(?:^|[/:@])(?:github\.com[:/]|github:)crvouga\/atlas(?:\.git)?(?=$|[/#?])/;
+const PROJECT_REPOSITORY = /(?:^|[/:@])(?:github\.com[:/]|github:)crvouga(?:-organization)?\/atlas(?:\.git)?(?=$|[/#?])/;
 
 function repositoryText(repository: unknown): string | undefined {
   if (typeof repository === 'string') return repository;
@@ -87,7 +87,7 @@ export function repositoryMatchesProject(repository: unknown): boolean {
 
 /** Names this repo publishes or used to publish (`@crvouga/atlas` and `-…`). */
 export function isProjectPackageName(name: string): boolean {
-  return name === `@${REPO}` || name.startsWith(`@${REPO}-`);
+  return name === `@${NPM_PROJECT}` || name.startsWith(`@${NPM_PROJECT}-`);
 }
 
 export type AccountPackument = {

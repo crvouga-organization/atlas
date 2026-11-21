@@ -51,7 +51,7 @@ describe('CI summary publication evidence', () => {
       result: 'success', outputs: { planned: JSON.stringify([{ name: '@crvouga/atlas', version: '1.2.3' }]) }
     }), env);
     for (const expected of [
-      '```text\nghcr.io/crvouga/atlas:latest\n```', `\`\`\`text\n${published}\n\`\`\``, digest,
+      '```text\nghcr.io/crvouga-organization/atlas:latest\n```', `\`\`\`text\n${published}\n\`\`\``, digest,
       'This run updated `latest`.', '/actions/runs/123#artifacts', '/commit/' + env.GITHUB_SHA,
       'https://www.npmjs.com/package/@crvouga/atlas/v/1.2.3', 'attempt 2', 'linux/amd64',
       'ATLAS_TOKEN', 'RAILWAY_RUN_UID=0', '/data', '/readyz', 'one replica', 'Configure Auto Updates'
@@ -64,7 +64,7 @@ describe('CI summary publication evidence', () => {
     const result = renderSummary(jobs({ result: 'success', outputs: { published, digest, latest: 'superseded' } }), env);
     expect(result).toContain('A newer main commit owns `latest`');
     expect(result).toContain(published);
-    expect(result).not.toContain('```text\nghcr.io/crvouga/atlas:latest\n```');
+    expect(result).not.toContain('```text\nghcr.io/crvouga-organization/atlas:latest\n```');
     expect(result).not.toContain('This run updated `latest`.');
   });
 

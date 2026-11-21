@@ -65,7 +65,7 @@ export function renderSummary(needs: Record<string, JobResult>, env: Record<stri
     }
     lines.push(
       '',
-      `[GHCR package](https://github.com/users/crvouga/packages/container/${job === 'image' ? 'atlas' : 'atlas-insecure'}) · [Railway deployment guide](${repo}/blob/${sha}/docs/deploying.md#run-it)`,
+      `[GHCR package](https://github.com/orgs/crvouga-organization/packages/container/${job === 'image' ? 'atlas' : 'atlas-insecure'}) · [Railway deployment guide](${repo}/blob/${sha}/docs/deploying.md#run-it)`,
       '',
       '### Railway settings (no code or checkout required)',
       '',
