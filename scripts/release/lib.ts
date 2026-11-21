@@ -3,7 +3,7 @@
  * the planning stays general over workspace packages so a second one would need no new code.
  *
  * Versions live in git tags, not in committed package.json files (the semantic-release model, and
- * the one crvouga/mockingbird uses). Each public package is tagged `<name>@<version>` at the commit
+ * the one crvouga-organization/mockingbird uses). Each public package is tagged `<name>@<version>` at the commit
  * it was released from; package.json keeps the `0.0.0-development` placeholder.
  *
  * A package is public when its manifest sets `publishConfig.access: "public"` and is not private.
