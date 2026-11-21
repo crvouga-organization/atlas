@@ -42,8 +42,8 @@ export function renderSummary(needs: Record<string, JobResult>, env: Record<stri
     '',
   ];
   for (const [job, label, image] of [
-    ['image', 'Docker image for Railway', 'ghcr.io/crvouga-organization/atlas'],
-    ['insecure-image', 'Insecure Docker image for Railway', 'ghcr.io/crvouga-organization/atlas-insecure']
+    ['image', 'Docker image for Railway', 'ghcr.io/crvouga/atlas'],
+    ['insecure-image', 'Insecure Docker image for Railway', 'ghcr.io/crvouga/atlas-insecure']
   ]) {
     lines.push(`## ${label}`, '');
     const output = needs[job!]?.outputs ?? {};

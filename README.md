@@ -102,7 +102,7 @@ Three labelled status examples also remain available: pending, running and error
 Copy this image URI into **Railway → New service → Docker image**:
 
 ```text
-ghcr.io/crvouga-organization/atlas:latest
+ghcr.io/crvouga/atlas:latest
 ```
 
 The image includes the Atlas server and viewer; hosting it needs no repository, Dockerfile, build command
@@ -132,7 +132,7 @@ and publisher tokens, the S3 bucket and sending results from your projects.
 For anonymous access, use this image in Railway instead:
 
 ```text
-ghcr.io/crvouga-organization/atlas-insecure:latest
+ghcr.io/crvouga/atlas-insecure:latest
 ```
 
 It contains the same server and viewer, with anonymous reading, uploads and administration enabled.
