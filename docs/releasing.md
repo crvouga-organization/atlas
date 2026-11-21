@@ -30,9 +30,9 @@ target and runs `bun scripts/container-smoke.ts <image> --insecure`, proving ano
 and admin settings, with the same persistence, healthcheck and shutdown checks.
 
 After checks and the container smoke pass, the job publishes the tested Linux AMD64 image to the personal
-GitHub Container Registry as `ghcr.io/crvouga/atlas:<full-commit-sha>` and `:latest`. This uses the same
+GitHub Container Registry as `ghcr.io/crvouga-organization/atlas:<full-commit-sha>` and `:latest`. This uses the same
 personal registry as the workspace repository, with no reusable hosting workflow or deployment dispatch.
-The insecure job publishes `ghcr.io/crvouga/atlas-insecure:<full-commit-sha>` and `:latest` independently,
+The insecure job publishes `ghcr.io/crvouga-organization/atlas-insecure:<full-commit-sha>` and `:latest` independently,
 after its own smoke passes. Both jobs report their confirmed publication references in the CI summary.
 Publication uses the built-in `GITHUB_TOKEN` with `packages: write`; no Docker Hub login, PAT or new repository
 secret is needed. Image publication is independent of the npm release job and also runs for docs/CI-only
@@ -49,8 +49,8 @@ GHCR creates new packages as private even for a public source repository
 The image's source label links it to this repository. Verify public access without logging in:
 
 ```sh
-docker run --rm --pull always --entrypoint bun ghcr.io/crvouga/atlas:latest --version
-docker run --rm --pull always --entrypoint bun ghcr.io/crvouga/atlas-insecure:latest --version
+docker run --rm --pull always --entrypoint bun ghcr.io/crvouga-organization/atlas:latest --version
+docker run --rm --pull always --entrypoint bun ghcr.io/crvouga-organization/atlas-insecure:latest --version
 ```
 
 Run that command on a machine with no GHCR login. A Bun version and exit 0 prove an anonymous pull and

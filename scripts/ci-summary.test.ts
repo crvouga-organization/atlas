@@ -10,8 +10,8 @@ const env = {
   GITHUB_RUN_ID: '123', GITHUB_RUN_NUMBER: '42', GITHUB_RUN_ATTEMPT: '2',
   GITHUB_SHA: 'a'.repeat(40), GITHUB_REF_NAME: 'main', GITHUB_EVENT_NAME: 'push'
 };
-const published = `ghcr.io/crvouga/atlas:${env.GITHUB_SHA}`;
-const digest = `ghcr.io/crvouga/atlas@sha256:${'b'.repeat(64)}`;
+const published = `ghcr.io/crvouga-organization/atlas:${env.GITHUB_SHA}`;
+const digest = `ghcr.io/crvouga-organization/atlas@sha256:${'b'.repeat(64)}`;
 const jobs = (image: JobResult, release: JobResult = { result: 'success', outputs: { planned: '[]' } }) => ({
   commitlint: { result: 'skipped' }, check: { result: 'success' }, s3: { result: 'success' },
   example: { result: 'success' }, image, release
@@ -19,7 +19,7 @@ const jobs = (image: JobResult, release: JobResult = { result: 'success', output
 
 describe('CI summary publication evidence', () => {
   test('insecure publication has independent evidence and token-free deployment instructions', () => {
-    const image = 'ghcr.io/crvouga/atlas-insecure';
+    const image = 'ghcr.io/crvouga-organization/atlas-insecure';
     const summary = renderSummary({
       ...jobs({ result: 'failure' }),
       'insecure-image': { result: 'success', outputs: {
@@ -41,7 +41,7 @@ describe('CI summary publication evidence', () => {
     const summary = renderSummary(jobs({ result: 'success', outputs: { published, digest, latest: 'updated' } }), env);
     const section = summary.split('## Insecure Docker image for Railway')[1]!.split('## npm release')[0]!;
     expect(section).toContain('No image publication confirmed');
-    expect(section).not.toContain(`ghcr.io/crvouga/atlas-insecure:${env.GITHUB_SHA}`);
+    expect(section).not.toContain(`ghcr.io/crvouga-organization/atlas-insecure:${env.GITHUB_SHA}`);
     expect(section).not.toContain(published);
     expect(section).not.toContain(digest);
   });
@@ -51,7 +51,7 @@ describe('CI summary publication evidence', () => {
       result: 'success', outputs: { planned: JSON.stringify([{ name: '@crvouga/atlas', version: '1.2.3' }]) }
     }), env);
     for (const expected of [
-      '```text\nghcr.io/crvouga/atlas:latest\n```', `\`\`\`text\n${published}\n\`\`\``, digest,
+      '```text\nghcr.io/crvouga-organization/atlas:latest\n```', `\`\`\`text\n${published}\n\`\`\``, digest,
       'This run updated `latest`.', '/actions/runs/123#artifacts', '/commit/' + env.GITHUB_SHA,
       'https://www.npmjs.com/package/@crvouga/atlas/v/1.2.3', 'attempt 2', 'linux/amd64',
       'ATLAS_TOKEN', 'RAILWAY_RUN_UID=0', '/data', '/readyz', 'one replica', 'Configure Auto Updates'
@@ -64,7 +64,7 @@ describe('CI summary publication evidence', () => {
     const result = renderSummary(jobs({ result: 'success', outputs: { published, digest, latest: 'superseded' } }), env);
     expect(result).toContain('A newer main commit owns `latest`');
     expect(result).toContain(published);
-    expect(result).not.toContain('```text\nghcr.io/crvouga/atlas:latest\n```');
+    expect(result).not.toContain('```text\nghcr.io/crvouga-organization/atlas:latest\n```');
     expect(result).not.toContain('This run updated `latest`.');
   });
 

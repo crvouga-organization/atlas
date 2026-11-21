@@ -230,7 +230,7 @@ jobs:
       contents: read
       packages: write
     env:
-      IMAGE: ghcr.io/crvouga/atlas
+      IMAGE: ghcr.io/crvouga-organization/atlas
     outputs:
       built: ${{ steps.build.outcome }}
       smoke: ${{ steps.smoke.outcome }}
@@ -303,7 +303,7 @@ jobs:
       contents: read
       packages: write
     env:
-      IMAGE: ghcr.io/crvouga/atlas-insecure
+      IMAGE: ghcr.io/crvouga-organization/atlas-insecure
     outputs:
       built: ${{ steps.build.outcome }}
       smoke: ${{ steps.smoke.outcome }}

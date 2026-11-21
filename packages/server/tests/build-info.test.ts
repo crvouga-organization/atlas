@@ -15,7 +15,7 @@ import { openConfiguredBackends, serverOptionsOf } from '../src/main';
 import { S3_TEST_ENV } from './fake-s3';
 
 const SHA = '8a5f0907f2c1d4e5b6a7980a1b2c3d4e5f607182';
-const DIGEST = `ghcr.io/crvouga/atlas@sha256:${'ab'.repeat(32)}`;
+const DIGEST = `ghcr.io/crvouga-organization/atlas@sha256:${'ab'.repeat(32)}`;
 
 async function serverInfo(options: Parameters<typeof createAtlasServer>[0]) {
   const server = createAtlasServer(options);
