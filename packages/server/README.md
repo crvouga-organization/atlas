@@ -7,7 +7,7 @@ everyone the combined report, live. A Bun API that serves the Vite-built viewer 
 Use it from the command line: `atlas serve`, `atlas dev` ([the guide](../../docs/server.md)). The command-line server keeps
 **all reports and all user state (the garbage collection policy, saved settings) in S3-compatible storage and nowhere
 else**, set by the required `ATLAS_S3_ENDPOINT`, `ATLAS_S3_BUCKET`, `ATLAS_S3_REGION`, `ATLAS_S3_ACCESS_KEY_ID` and
-`ATLAS_S3_SECRET_ACCESS_KEY` variables (see [`.env.example`](https://github.com/crvouga/atlas/blob/main/.env.example)); it exits with status 2, listing every
+`ATLAS_S3_SECRET_ACCESS_KEY` variables (see [`.env.example`](https://github.com/crvouga-organization/atlas/blob/main/.env.example)); it exits with status 2, listing every
 variable and what is wrong, if they are missing or invalid. Use it from code when you want the server inside something else,
 and bring your own `ObjectStore` (a bucket, or a memory store in tests):
 

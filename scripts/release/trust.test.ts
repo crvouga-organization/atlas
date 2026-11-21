@@ -6,7 +6,7 @@ const config: TrustConfig = {
   id: 'healthy-id',
   type: 'github',
   permissions: ['createPackage'],
-  claims: { repository: 'crvouga/atlas', workflow_ref: { file: 'ci.yml' } }
+  claims: { repository: 'crvouga-organization/atlas', workflow_ref: { file: 'ci.yml' } }
 };
 
 describe('local seed trust reconciliation', () => {
@@ -33,7 +33,7 @@ describe('local seed trust reconciliation', () => {
           id: 'cli-id',
           type: 'github',
           file: 'ci.yml',
-          repository: 'crvouga/atlas',
+          repository: 'crvouga-organization/atlas',
           permissions: ['createPackage', 'createStagedPackage']
         })
       )
@@ -45,10 +45,10 @@ describe('local seed trust reconciliation', () => {
       normalizedTrustConfig({
         type: 'github',
         file: 'ci.yml',
-        repository: 'crvouga/atlas'
+        repository: 'crvouga-organization/atlas'
       }).claims
     ).toEqual({
-      repository: 'crvouga/atlas',
+      repository: 'crvouga-organization/atlas',
       workflow_ref: { file: 'ci.yml' }
     });
   });

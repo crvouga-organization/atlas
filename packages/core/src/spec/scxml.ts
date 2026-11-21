@@ -27,7 +27,7 @@ import { invokesOf, targetOf } from './types';
  *   A final state's `atlas:done-event` attribute names the event its parent receives. Meta values
  *   that are not strings are written as JSON in an element marked `type="json"`.
  */
-export const ATLAS_NS = 'https://github.com/crvouga/atlas/ns/1';
+export const ATLAS_NS = 'https://github.com/crvouga-organization/atlas/ns/1';
 const SCXML_NS = 'http://www.w3.org/2005/07/scxml';
 
 type XmlNode = Record<string, unknown> & { ':@'?: Record<string, string> };

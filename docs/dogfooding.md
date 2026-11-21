@@ -70,7 +70,7 @@ part of its interface.
 ## Upgrade
 
 Every releasable change that lands on Atlas's `main` is published within minutes; nobody cuts
-releases by hand ([releasing.md](https://github.com/crvouga/atlas/blob/main/docs/releasing.md)). There is one package and one version, so an upgrade
+releases by hand ([releasing.md](https://github.com/crvouga-organization/atlas/blob/main/docs/releasing.md)). There is one package and one version, so an upgrade
 is one line:
 
 ```sh
@@ -87,7 +87,7 @@ npm view @crvouga/atlas version                       # the newest release
 cat node_modules/@crvouga/atlas/CHANGELOG.md          # every release up to the version you have
 ```
 
-Each release is also a [GitHub Release](https://github.com/crvouga/atlas/releases) with the same
+Each release is also a [GitHub Release](https://github.com/crvouga-organization/atlas/releases) with the same
 notes. Versions follow semver; a breaking change is a major version, and its notes say what to
 change.
 

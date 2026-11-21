@@ -38,7 +38,7 @@ backends, and tells you in one command whether the product still does what it wa
 > change this repository. If you are integrating Atlas, or are an agent working in a project that
 > uses it, read **[integrating Atlas](docs/integrating.md)**, then
 > [using Atlas from another project](docs/dogfooding.md) and [reporting issues](docs/reporting-issues.md).
-> Releases are automatic: see [releasing](https://github.com/crvouga/atlas/blob/main/docs/releasing.md).
+> Releases are automatic: see [releasing](https://github.com/crvouga-organization/atlas/blob/main/docs/releasing.md).
 
 ## Given this repo link to integrate Atlas?
 
@@ -102,7 +102,7 @@ Three labelled status examples also remain available: pending, running and error
 Copy this image URI into **Railway → New service → Docker image**:
 
 ```text
-ghcr.io/crvouga/atlas:latest
+ghcr.io/crvouga-organization/atlas:latest
 ```
 
 The image includes the Atlas server and viewer; hosting it needs no repository, Dockerfile, build command
@@ -121,7 +121,7 @@ the newest checked `main` image, independently of npm releases.
    [Railway checks for image updates periodically](https://docs.railway.com/deployments/image-auto-updates);
    detection can take a few hours.
 
-For the exact image from a run, open **[CI](https://github.com/crvouga/atlas/actions/workflows/ci.yml) →
+For the exact image from a run, open **[CI](https://github.com/crvouga-organization/atlas/actions/workflows/ci.yml) →
 run → Summary → Atlas CI**. The summary includes a copyable full commit tag, the immutable registry digest,
 whether that run updated `latest`, all job results, npm release details and artifact links. Use the commit
 tag to pin or roll back a deployment. The [deployment guide](docs/deploying.md#run-it) covers optional reader
@@ -132,7 +132,7 @@ and publisher tokens, the S3 bucket and sending results from your projects.
 For anonymous access, use this image in Railway instead:
 
 ```text
-ghcr.io/crvouga/atlas-insecure:latest
+ghcr.io/crvouga-organization/atlas-insecure:latest
 ```
 
 It contains the same server and viewer, with anonymous reading, uploads and administration enabled.
@@ -282,7 +282,7 @@ settings saved there. The server reads the policy from that document each time i
 policy, garbage collection is off and nothing is ever deleted.
 
 Because of that, the storage settings are **required environment variables with no defaults** (see
-[`.env.example`](https://github.com/crvouga/atlas/blob/main/.env.example)), and the server **refuses to start** (exit status 2) without them:
+[`.env.example`](https://github.com/crvouga-organization/atlas/blob/main/.env.example)), and the server **refuses to start** (exit status 2) without them:
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
@@ -374,7 +374,7 @@ Each run publishes as a layer (`atlas report publish --manifest <run>/manifest.j
 with every other suite's evidence. Shards, seeds, several clients in one run, drivers (Playwright,
 Bun WebView, WebDriver and Appium, Detox, plain functions), business events and the privacy scan are
 in **[Executable statecharts](docs/statecharts.md)**, which starts with a runnable example,
-[`examples/todo`](https://github.com/crvouga/atlas/tree/main/examples/todo).
+[`examples/todo`](https://github.com/crvouga-organization/atlas/tree/main/examples/todo).
 
 ## License
 

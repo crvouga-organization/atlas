@@ -767,7 +767,7 @@ function buildRun(spec: LoadedSpec, runsDir: string, plan: RunPlan) {
   coverage.overall = { states: countOf(Object.values(states).map((r) => r.status)), transitions: countOf(Object.values(transitions).map((r) => r.status)) };
 
   const manifest: Manifest = {
-    $schema: 'https://github.com/crvouga/atlas/schemas/manifest.schema.json',
+    $schema: 'https://github.com/crvouga-organization/atlas/schemas/manifest.schema.json',
     schemaVersion: 1,
     run: {
       id,

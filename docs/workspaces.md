@@ -78,7 +78,7 @@ The lower-level workflows remain available through their source files instead of
 `bun scripts/examples.ts all` runs both example suites against an existing server; `run` and `clients` select one.
 `bun examples/todo/publish.ts` uploads already-recorded results without rerunning suites. Spec linting, planning and
 fast-mode execution use the existing Atlas CLI, as described in [statecharts](statecharts.md).
-Release and health maintenance use `scripts/release/*.ts` and `scripts/health/cli.ts`; see [releasing](https://github.com/crvouga/atlas/blob/main/docs/releasing.md).
+Release and health maintenance use `scripts/release/*.ts` and `scripts/health/cli.ts`; see [releasing](https://github.com/crvouga-organization/atlas/blob/main/docs/releasing.md).
 Viewer fixture generation and data publishing remain `packages/visualizer/scripts/make-fixtures.ts` and
 `packages/visualizer/scripts/publish-data.ts`.
 
@@ -99,7 +99,7 @@ bun run dev --status
 
 Everything binds to `127.0.0.1`; use IDE port forwarding, `bun run dev --share` or SSH remotely (see [viewing it from another machine](#viewing-it-from-another-machine)). Atlas still reads and writes reports and user
 state through S3 only. With no `ATLAS_S3_*` configuration, dev starts
-[Mockingbird S3](https://github.com/crvouga/mockingbird/tree/main/packages/service/s3) on an ephemeral loopback port,
+[Mockingbird S3](https://github.com/crvouga-organization/mockingbird/tree/main/packages/service/s3) on an ephemeral loopback port,
 creates its bucket, and persists the emulator's objects and metadata in `.atlas-workspace/s3/storage.sqlite`
 using Bun's file-backed SQLite (WAL, synchronous commits). Its development credentials are `fixture` / `fixture`,
 and it validates signed S3 requests. No Docker daemon or external storage service is needed.
@@ -123,12 +123,12 @@ owner PID is gone. An unauthenticated live owner must be investigated, never kil
 
 ## IDE configuration
 
-[`.superset/config.json`](https://github.com/crvouga/atlas/blob/main/.superset/config.json) uses `dev --setup`, `dev`
+[`.superset/config.json`](https://github.com/crvouga-organization/atlas/blob/main/.superset/config.json) uses `dev --setup`, `dev`
 and `dev --stop` for setup, Run and teardown. Personal overrides stay in ignored `.superset/config.local.json`.
 Superset resolves Run from the main repository's config: commit scripts and configuration together before expecting
 another workspace to discover them. See its [lifecycle guide](https://docs.superset.sh/setup-teardown-scripts).
 
-[`.super.engineering/config.json`](https://github.com/crvouga/atlas/blob/main/.super.engineering/config.json) presents
+[`.super.engineering/config.json`](https://github.com/crvouga-organization/atlas/blob/main/.super.engineering/config.json) presents
 one **Dev** target and the CI targets **Check**, **Test**, **Build**, **Docs** and **Smoke**. Dev is the default;
 Docs runs `docs --check`. Setup and teardown use the same dev modes as the other IDEs. Existing preview, status and
 review workflows remain available through dev flags and [UI conventions](ui.md), without duplicate shortcuts.
@@ -145,7 +145,7 @@ sc project scripts stop Dev --json
 Edit scripts with `sc project scripts set ... --scope repo` and shared commands with `sc commands ... --scope shared`;
 preserve unknown fields. See [project configuration](https://super.engineering/docs/project-config-and-scripts/).
 
-[`orca.yaml`](https://github.com/crvouga/atlas/blob/main/orca.yaml) keeps `scripts.setup`, `scripts.archive` and
+[`orca.yaml`](https://github.com/crvouga-organization/atlas/blob/main/orca.yaml) keeps `scripts.setup`, `scripts.archive` and
 `setupAgentStartupPolicy: wait-for-setup`. Its first tab is reserved for the agent; the second runs `bun run dev`.
 No unsupported `scripts.run` key is added. Keep Shared + Local or Shared only enabled for repository hooks and approve
 Orca's shared-config trust prompt when offered. These are user-owned settings. Existing workspaces can run the same
@@ -154,7 +154,7 @@ Bun command in a terminal; default tabs apply to new workspaces. See the [Orca r
 ### T3 Code
 
 T3 Code keeps project scripts in its own settings, not in the repository, so it does not read a file by itself.
-[`.t3code/project.json`](https://github.com/crvouga/atlas/blob/main/.t3code/project.json) holds Atlas's settings in
+[`.t3code/project.json`](https://github.com/crvouga-organization/atlas/blob/main/.t3code/project.json) holds Atlas's settings in
 exactly the shape T3's project settings take: worktree threads by default and about twenty scripts. Every script calls
 the shared `bun run dev` lifecycle or a repository check, with no machine-specific paths, so one file serves every
 machine. To apply it on a machine, ask an agent in a T3 thread of the Atlas project: *"Apply .t3code/project.json to

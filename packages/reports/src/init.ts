@@ -182,8 +182,8 @@ function agentsSection(plan: Pick<InitPlan, 'suites' | 'specs' | 'server' | 'git
     BEGIN,
     '## Atlas: test evidence for this project',
     '',
-    `This project sends the results of its test suites to an [Atlas](https://github.com/crvouga/atlas) server (${url}), which shows everyone one combined, live report. A check is identified by a stable id; the newest completed result of each check wins; unknown is never a pass. Set \`ATLAS_STORE=${url}\` and \`ATLAS_TOKEN\` (a \`publish\` token for sending, a \`read\` token for asking).`,
-    'Set `ATLAS_PROJECT` to the same stable project slug locally and in CI; this selects the project on a shared node. Use the installed `@crvouga/atlas` and the project\'s lockfile. Integration guide: https://github.com/crvouga/atlas/blob/main/docs/agents.md (version-matched copy: `node_modules/@crvouga/atlas/docs/agents.md`).',
+    `This project sends the results of its test suites to an [Atlas](https://github.com/crvouga-organization/atlas) server (${url}), which shows everyone one combined, live report. A check is identified by a stable id; the newest completed result of each check wins; unknown is never a pass. Set \`ATLAS_STORE=${url}\` and \`ATLAS_TOKEN\` (a \`publish\` token for sending, a \`read\` token for asking).`,
+    'Set `ATLAS_PROJECT` to the same stable project slug locally and in CI; this selects the project on a shared node. Use the installed `@crvouga/atlas` and the project\'s lockfile. Integration guide: https://github.com/crvouga-organization/atlas/blob/main/docs/agents.md (version-matched copy: `node_modules/@crvouga/atlas/docs/agents.md`).',
     '',
     '- **Machine-readable API:** `' + `${url}/api/openapi.json` + '` (OpenAPI 3.1). **Guide for agents:** `' + `${url}/llms.txt` + '`.',
     '- **After you change behaviour,** run the suite, then send its results (publish even when it fails: a failure is evidence).',
@@ -192,7 +192,7 @@ function agentsSection(plan: Pick<InitPlan, 'suites' | 'specs' | 'server' | 'git
     `- **Is it passing?** \`${exec} atlas report status --branch ${plan.git.defaultBranch} --ignore-modified --format json\` (exit 0 passes, 1 does not, 2 means the command was wrong). The failing checks are in \`failing\`.`,
     plan.specs.directory ? `- **Specs** live in \`${plan.specs.directory}/\` (${Object.entries(plan.specs.kinds).map(([kind, count]) => `${count} ${kind}`).join(', ')}). Results are laid over them by path.` : '- No spec files were found. Pass `--spec <path>` or `--specs <dir>` to `publish` to link checks to specs.',
     '- Keep each check\'s `id` stable across runs: that is what lets a new result replace an old one.',
-    '- Evidence (screenshots, videos, traces, logs) rides on checks: https://github.com/crvouga/atlas/blob/main/docs/extending.md',
+    '- Evidence (screenshots, videos, traces, logs) rides on checks: https://github.com/crvouga-organization/atlas/blob/main/docs/extending.md',
     END
   ];
   return `${lines.join('\n')}\n`;

@@ -442,7 +442,7 @@ higher-is-better. The address holds the critic, the state kind and the open entr
 
 ## What is not here yet
 
-Out of scope until the open questions of [issue 50](https://github.com/crvouga/atlas/issues/50) are settled, because they need the
+Out of scope until the open questions of [issue 50](https://github.com/crvouga-organization/atlas/issues/50) are settled, because they need the
 weights, a license or a network that this repository does not have:
 
 - the **UIClip critic's parity** with the in-house package it is meant to absorb: its exact preprocessing and score head, checked

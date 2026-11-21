@@ -6,7 +6,7 @@
   plays each client.
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
-       xmlns:atlas="https://github.com/crvouga/atlas/ns/1"
+       xmlns:atlas="https://github.com/crvouga-organization/atlas/ns/1"
        version="1.0"
        datamodel="null"
        name="Shared list"

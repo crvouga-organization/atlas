@@ -14,7 +14,7 @@ decisions behind it, the command line, and what stays in your project.
 Developing Atlas itself? `bun run dev` populates the todo example's catalog automatically, alongside its other reports.
 Choose **UI catalog** from the spec-type menu to browse seven states across desktop and mobile profiles, including
 empty, offline and pending-sync states. The collector is
-[`examples/todo/catalog.ts`](https://github.com/crvouga/atlas/blob/main/examples/todo/catalog.ts): it starts its own isolated
+[`examples/todo/catalog.ts`](https://github.com/crvouga-organization/atlas/blob/main/examples/todo/catalog.ts): it starts its own isolated
 app server, drives the real UI, publishes the expected set and screenshots, and closes its browser and server.
 
 Local development and the example preview also keep three **Status examples** available after collection completes:
@@ -552,7 +552,7 @@ atlas ui-catalog export --store merged/store --out catalog.html  # offline: no s
 ### A CI kit: plan, capture, finalize
 
 The kit composes the commands above; it schedules nothing. `plan-matrix` prints a fan-out of the definition, ready for a GitHub Actions
-matrix, and [`examples/ci/ui-catalog.yml`](https://github.com/crvouga/atlas/blob/main/examples/ci/ui-catalog.yml) is a reusable workflow to copy into `.github/workflows/`:
+matrix, and [`examples/ci/ui-catalog.yml`](https://github.com/crvouga-organization/atlas/blob/main/examples/ci/ui-catalog.yml) is a reusable workflow to copy into `.github/workflows/`:
 plan (and begin the refresh) → build once per mode → preflight (fails fast; its diagnostics are uploaded anyway) → capture fan-out →
 finalize (merge every attempt's bundle, import, export, finalize). The build, smoke and capture commands stay yours.
 

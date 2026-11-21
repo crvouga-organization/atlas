@@ -873,7 +873,7 @@ export function openApiDocument(options: { readonly serverUrl?: string } = {}): 
         '',
         '**Compatibility.** Within `/api` the API only grows: optional parameters, optional response fields, new events. Ignore what you do not know.',
         '',
-        'Guides: `/llms.txt`. Source: https://github.com/crvouga/atlas.'
+        'Guides: `/llms.txt`. Source: https://github.com/crvouga-organization/atlas.'
       ].join('\n'),
       license: { name: 'MIT', identifier: 'MIT' }
     },

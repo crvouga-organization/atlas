@@ -64,7 +64,7 @@ export function registryPackagePath(name: string): string {
 }
 
 /**
- * `github.com/crvouga/atlas` or `github:crvouga/atlas`, including
+ * `github.com/crvouga-organization/atlas` or `github:crvouga-organization/atlas`, including
  * `.git` and a trailing path. A longer repo name such as `atlas-extra`
  * does not match.
  */

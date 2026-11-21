@@ -469,7 +469,7 @@ export function buildManifest<C>(
   const uniqueLeaks = [...new Set(leaks)];
 
   const draft = {
-    $schema: 'https://github.com/crvouga/atlas/schemas/manifest.schema.json',
+    $schema: 'https://github.com/crvouga-organization/atlas/schemas/manifest.schema.json',
     schemaVersion: 1,
     run: {
       id: run.id,
