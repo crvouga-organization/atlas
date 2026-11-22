@@ -94,7 +94,7 @@ export const SCHEMAS: Record<string, z.ZodType> = {
 export function renderSchemas(): Record<string, string> {
   return Object.fromEntries(Object.entries(SCHEMAS).map(([name, schema]) => {
     const json = z.toJSONSchema(schema, { target: 'draft-2020-12', unrepresentable: 'any', io: 'input' });
-    const document = { $id: `https://github.com/crvouga-organization/atlas/schemas/${name}.schema.json`, ...json };
+    const document = { $id: `https://github.com/crvouga/atlas/schemas/${name}.schema.json`, ...json };
     return [`${name}.schema.json`, `${JSON.stringify(document, null, 2)}\n`];
   }));
 }

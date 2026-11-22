@@ -25,7 +25,7 @@ spec:
       serviceAccountName: atlas
       containers:
         - name: atlas
-          image: ghcr.io/crvouga-organization/atlas:latest
+          image: ghcr.io/crvouga/atlas:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8080

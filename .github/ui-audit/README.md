@@ -1,6 +1,6 @@
 # UI overhaul audit
 
-PR: https://github.com/crvouga-organization/atlas/pull/105
+PR: https://github.com/crvouga/atlas/pull/105
 
 Council workflow: https://github.com/andrewvaughan/agent-council, `setup-design-system`, Design Lead / Frontend Specialist / Product Strategist subset. Atlas's established Mantine conventions override the workflow's generic Tailwind suggestions. The user authorized autonomous iterations and PR updates.
 

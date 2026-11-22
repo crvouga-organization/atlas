@@ -15,7 +15,7 @@ test('the JSON Schema files are the ones the Zod schemas emit (run `bun run docs
 test('every schema names itself and its dialect', () => {
   for (const file of readdirSync(directory)) {
     const schema = JSON.parse(readFileSync(path.join(directory, file), 'utf8')) as { $id: string; $schema: string };
-    expect(schema.$id).toBe(`https://github.com/crvouga-organization/atlas/schemas/${file}`);
+    expect(schema.$id).toBe(`https://github.com/crvouga/atlas/schemas/${file}`);
     expect(schema.$schema).toBe('https://json-schema.org/draft/2020-12/schema');
   }
 });

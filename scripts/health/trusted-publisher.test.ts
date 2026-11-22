@@ -20,7 +20,7 @@ import type { WebChallenge } from './web-auth.ts';
 const github = (overrides: TrustConfig = {}): TrustConfig => ({
   type: 'github',
   permissions: ['createPackage'],
-  claims: { repository: 'crvouga-organization/atlas', workflow_ref: { file: 'ci.yml' } },
+  claims: { repository: 'crvouga/atlas', workflow_ref: { file: 'ci.yml' } },
   ...overrides
 });
 
@@ -35,7 +35,7 @@ describe('publisherGap', () => {
         {
           type: 'github',
           file: 'ci.yml',
-          repository: 'crvouga-organization/atlas',
+          repository: 'crvouga/atlas',
           permissions: ['createPackage']
         }
       ])
@@ -47,7 +47,7 @@ describe('publisherGap', () => {
       publisherGap(true, [
         {
           type: 'github',
-          claims: { repository: 'crvouga-organization/atlas', workflow_ref: { file: 'ci.yml' } }
+          claims: { repository: 'crvouga/atlas', workflow_ref: { file: 'ci.yml' } }
         }
       ])
     ).toBeNull();
@@ -58,8 +58,8 @@ describe('publisherGap', () => {
       publisherGap(true, [
         github({
           claims: {
-            repository: 'crvouga-organization/atlas',
-            workflow_ref: 'crvouga-organization/atlas/.github/workflows/ci.yml@refs/heads/main'
+            repository: 'crvouga/atlas',
+            workflow_ref: 'crvouga/atlas/.github/workflows/ci.yml@refs/heads/main'
           }
         })
       ])
@@ -72,7 +72,7 @@ describe('publisherGap', () => {
     expect(
       publisherGap(true, [
         github({
-          claims: { repository: 'crvouga-organization/atlas', workflow_ref: { file: 'release.yml' } }
+          claims: { repository: 'crvouga/atlas', workflow_ref: { file: 'release.yml' } }
         })
       ])
     ).toBe('missing');
@@ -88,7 +88,7 @@ describe('publisherGap', () => {
       publisherGap(true, [
         github({
           claims: {
-            repository: 'crvouga-organization/atlas',
+            repository: 'crvouga/atlas',
             workflow_ref: { file: 'ci.yml' },
             environment: 'release'
           }
@@ -127,7 +127,7 @@ describe('trustedPublisherReport', () => {
         '',
         'trusted publisher — 4 to fix',
         '',
-        'No GitHub Actions publisher for crvouga-organization/atlas ci.yml. On the access page add one and allow npm publish. Organization crvouga-organization, repository atlas, workflow filename ci.yml, environment empty.',
+        'No GitHub Actions publisher for crvouga/atlas ci.yml. On the access page add one and allow npm publish. Organization crvouga, repository atlas, workflow filename ci.yml, environment empty.',
         accessUrl('@crvouga/atlas-fullscript'),
         '',
         'GitHub Actions publisher does not allow npm publish (stage only). On the access page, allow npm publish.',
@@ -241,16 +241,23 @@ describe('registryPackagePath', () => {
 
 describe('repositoryMatchesProject', () => {
   test("accepts this repo's git, https, ssh, and github shorthand forms", () => {
+    expect(repositoryMatchesProject({ url: 'git+https://github.com/crvouga/atlas.git' })).toBe(true);
+    expect(repositoryMatchesProject('https://github.com/crvouga/atlas')).toBe(true);
+    expect(repositoryMatchesProject('git@github.com:crvouga/atlas.git')).toBe(true);
+    expect(repositoryMatchesProject('git+ssh://git@github.com/crvouga/atlas.git')).toBe(true);
+    expect(repositoryMatchesProject('github:crvouga/atlas')).toBe(true);
+    expect(repositoryMatchesProject('git+https://github.com/crvouga/atlas.git/packages/core')).toBe(true);
+  });
+
+  test('accepts the owner the repo had for a day, which published metadata may still name', () => {
     expect(repositoryMatchesProject({ url: 'git+https://github.com/crvouga-organization/atlas.git' })).toBe(true);
-    expect(repositoryMatchesProject('https://github.com/crvouga-organization/atlas')).toBe(true);
-    expect(repositoryMatchesProject('git@github.com:crvouga-organization/atlas.git')).toBe(true);
-    expect(repositoryMatchesProject('git+ssh://git@github.com/crvouga-organization/atlas.git')).toBe(true);
     expect(repositoryMatchesProject('github:crvouga-organization/atlas')).toBe(true);
-    expect(repositoryMatchesProject('git+https://github.com/crvouga-organization/atlas.git/packages/core')).toBe(true);
+    expect(repositoryMatchesProject('git+https://github.com/crvouga-organization/atlas-extra.git')).toBe(false);
+    expect(repositoryMatchesProject('https://github.com/crvouga-organizations/atlas')).toBe(false);
   });
 
   test('rejects another repo, including one that only shares a name prefix', () => {
-    expect(repositoryMatchesProject({ url: 'git+https://github.com/crvouga-organization/postgres-mem.git' })).toBe(false);
+    expect(repositoryMatchesProject({ url: 'git+https://github.com/crvouga/postgres-mem.git' })).toBe(false);
     expect(repositoryMatchesProject('git+https://github.com/crvouga/atlas-extra.git')).toBe(false);
     expect(repositoryMatchesProject('https://github.com/other/atlas')).toBe(false);
     expect(repositoryMatchesProject(undefined)).toBe(false);
@@ -259,7 +266,7 @@ describe('repositoryMatchesProject', () => {
 });
 
 describe('selectProjectPackages', () => {
-  const atlas = { url: 'git+https://github.com/crvouga-organization/atlas.git' };
+  const atlas = { url: 'git+https://github.com/crvouga/atlas.git' };
 
   test("keeps this repo's packages and public workspace packages, and leaves other npm projects out", () => {
     expect(
@@ -269,7 +276,7 @@ describe('selectProjectPackages', () => {
           {
             name: '@crvouga/postgres-mem',
             status: 200,
-            repository: { url: 'git+https://github.com/crvouga-organization/postgres-mem.git' }
+            repository: { url: 'git+https://github.com/crvouga/postgres-mem.git' }
           },
           { name: '@crvouga/result', status: 404 },
           {
@@ -307,7 +314,7 @@ describe('account package list', () => {
   });
 
   test('reads repository from the packument, then from the latest version', () => {
-    const repository = { url: 'git+https://github.com/crvouga-organization/atlas.git' };
+    const repository = { url: 'git+https://github.com/crvouga/atlas.git' };
     expect(packumentRepository({ repository })).toEqual(repository);
     expect(
       packumentRepository({

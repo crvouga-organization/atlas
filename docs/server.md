@@ -56,10 +56,10 @@ bunx atlas dev                               # http://127.0.0.1:5180 (same ATLAS
 ATLAS_STORE=http://127.0.0.1:5180 bunx atlas report publish --producer unit --junit out.xml
 ```
 
-For Railway, deploy `ghcr.io/crvouga-organization/atlas:latest` directly: the image contains the server and
+For Railway, deploy `ghcr.io/crvouga/atlas:latest` directly: the image contains the server and
 viewer, and every green `main` push updates it. See [running Atlas for a project](deploying.md#run-it) for
 Railway's variables, tokens, healthcheck and image auto updates, or for Docker, Kubernetes and CI.
-For anonymous reading, uploads and administration, use `ghcr.io/crvouga-organization/atlas-insecure:latest` with no tokens
+For anonymous reading, uploads and administration, use `ghcr.io/crvouga/atlas-insecure:latest` with no tokens
 configured; see [deploying without authentication](deploying.md#deploy-without-authentication).
 
 ## Required S3 storage
@@ -79,7 +79,7 @@ local-disk, in-memory or database fallback and no flag to choose another place, 
 | `ATLAS_S3_PATH_STYLE` | no | `1` (default) for `endpoint/bucket/key`, `0` for virtual-hosted `bucket.endpoint/key` |
 | `ATLAS_S3_SESSION_TOKEN` | no | Only for temporary credentials |
 
-[`.env.example`](https://github.com/crvouga-organization/atlas/blob/main/.env.example) lists them with explanations. The server does not look for
+[`.env.example`](https://github.com/crvouga/atlas/blob/main/.env.example) lists them with explanations. The server does not look for
 ambient AWS credentials (`AWS_*`, profiles, instance roles) and the old `ATLAS_STORE`, `ATLAS_WRITE`, `ATLAS_DATA`,
 `--store`, `--write`, `--data` and the `data`, `backends` and `write` keys of `atlas.server.json` are gone; a
 configuration file that still has one of the keys is refused with a message that says so.
@@ -122,7 +122,7 @@ Everything a person using Atlas has chosen is **user state**: one JSON document,
 }
 ```
 
-(published as [`user-state.schema.json`](https://github.com/crvouga-organization/atlas/blob/main/packages/schema/schemas/user-state.schema.json))
+(published as [`user-state.schema.json`](https://github.com/crvouga/atlas/blob/main/packages/schema/schemas/user-state.schema.json))
 
 - **`gc` is the garbage collection policy**, defined in the Atlas UI (**Settings**, `/admin`, *Garbage collection*) and
   read by the server **from S3 every time it collects**, so a saved policy applies at the next pass without a restart.
@@ -165,7 +165,7 @@ Everything but the [S3 storage](#required-s3-storage) has a default. Settings co
 `atlas.server.json` (or `--config <file>` / `ATLAS_CONFIG`), then environment variables, then flags; a later one
 wins. A mistake (an unknown key, a short token, listening beyond this machine without tokens)
 is said in words and the server does not start. The file has a published
-[JSON Schema](https://github.com/crvouga-organization/atlas/blob/main/packages/schema/schemas/server-config.schema.json)
+[JSON Schema](https://github.com/crvouga/atlas/blob/main/packages/schema/schemas/server-config.schema.json)
 (`@crvouga/atlas/schemas/server-config.schema.json`).
 
 ```json

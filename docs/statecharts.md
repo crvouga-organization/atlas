@@ -23,7 +23,7 @@ and the implementation says how a driver makes each event happen and recognises 
 
 ## Quick start: the todo example
 
-[`examples/todo`](https://github.com/crvouga-organization/atlas/tree/main/examples/todo) is a dependency-free web app (static HTML and vanilla JavaScript
+[`examples/todo`](https://github.com/crvouga/atlas/tree/main/examples/todo) is a dependency-free web app (static HTML and vanilla JavaScript
 served by a small Node server) specified as two charts:
 
 - `specs/todo-app.scxml`, the root chart in SCXML: a welcome screen, a "Setting up" state that
@@ -96,7 +96,7 @@ Manifest: examples/todo/atlas-runs/<run-id>/manifest.json
 
 `example:run` then runs the Gherkin features in a browser and the Quint model, and streams every scenario and trace as it runs, including sharing and renaming. The final recordings are uploaded alongside the completed statechart run.
 
-`bun test examples` runs [`model.test.ts`](https://github.com/crvouga-organization/atlas/blob/main/examples/todo/model.test.ts): the same charts and journeys
+`bun test examples` runs [`model.test.ts`](https://github.com/crvouga/atlas/blob/main/examples/todo/model.test.ts): the same charts and journeys
 against `TodoModel`, a plain class, through `functionDriver` and `describeAtlas`. Only the driver
 and the implementation differ, which is the point: the spec belongs to the product, not to one
 test tool.
@@ -152,7 +152,7 @@ SCXML ids are XML IDs and event attributes are token lists, so business names tr
 `atlas:name` attribute next to a token id. Metadata lives in the `atlas` namespace, as SCXML allows:
 
 ```xml
-<scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:atlas="https://github.com/crvouga-organization/atlas/ns/1"
+<scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:atlas="https://github.com/crvouga/atlas/ns/1"
        version="1.0" datamodel="null" name="Todo app" initial="welcome">
   <state id="welcome" atlas:name="Welcome">
     <atlas:meta>
@@ -424,7 +424,7 @@ export default defineConfig<Clients>({
 - If one client cannot open (no simulator booted), the others are closed and the attempt fails
   naming that client.
 
-[`examples/todo/clients`](https://github.com/crvouga-organization/atlas/tree/main/examples/todo/clients) runs a chart (`specs/clients/shared-list.scxml`)
+[`examples/todo/clients`](https://github.com/crvouga/atlas/tree/main/examples/todo/clients) runs a chart (`specs/clients/shared-list.scxml`)
 across a phone, a desktop and the sync server; pick each device's driver with `ATLAS_PHONE` and
 `ATLAS_DESKTOP` (`playwright`, `bun` or `webdriver`).
 

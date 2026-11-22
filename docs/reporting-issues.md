@@ -25,7 +25,7 @@ when you cannot tell.
 4. File it:
 
    ```sh
-   gh issue create --repo crvouga-organization/atlas \
+   gh issue create --repo crvouga/atlas \
      --title "[core] bug: plan skips a transition guarded by a parallel region" \
      --label agent-reported,bug \
      --body-file issue.md
@@ -74,7 +74,7 @@ When you cannot show the problem without something on this list, stop and ask yo
 ## 1. Search first
 
 ```sh
-gh issue list --repo crvouga-organization/atlas --state all --search "<part> <what breaks or is missing> in:title,body"
+gh issue list --repo crvouga/atlas --state all --search "<part> <what breaks or is missing> in:title,body"
 ```
 
 If an open issue covers the same thing, add a comment with your evidence (versions, reproduction,
@@ -125,7 +125,7 @@ Copy the template for the kind, fill in every section, delete the HTML comments,
 file. Then run:
 
 ```sh
-gh issue create --repo crvouga-organization/atlas \
+gh issue create --repo crvouga/atlas \
   --title "<title in the format from the quick reference>" \
   --label agent-reported,<kind> \
   --body-file issue.md
@@ -133,14 +133,14 @@ gh issue create --repo crvouga-organization/atlas \
 
 | Kind | Template (raw, for copying) |
 | --- | --- |
-| `bug` | <https://raw.githubusercontent.com/crvouga-organization/atlas/main/.github/ISSUE_TEMPLATE/bug.md> |
-| `feature` | <https://raw.githubusercontent.com/crvouga-organization/atlas/main/.github/ISSUE_TEMPLATE/feature.md> |
+| `bug` | <https://raw.githubusercontent.com/crvouga/atlas/main/.github/ISSUE_TEMPLATE/bug.md> |
+| `feature` | <https://raw.githubusercontent.com/crvouga/atlas/main/.github/ISSUE_TEMPLATE/feature.md> |
 
 Each template begins with a `---` front-matter block; leave it out of the body file.
 
 If `gh` is not installed or not authenticated, do not install it or log in on your own. Give your
 human the finished title and body and the link to the matching form, for example
-<https://github.com/crvouga-organization/atlas/issues/new?template=bug.md>.
+<https://github.com/crvouga/atlas/issues/new?template=bug.md>.
 
 ## What happens next
 
@@ -156,5 +156,5 @@ An issue labelled `needs-info` is waiting on you: answer the question in the com
 Merging the fix publishes it. The release then comments on the issue with the exact version that
 carries it. Upgrade (`bun update @crvouga/atlas --latest`) and remove your workaround.
 
-[t-bug]: https://github.com/crvouga-organization/atlas/blob/main/.github/ISSUE_TEMPLATE/bug.md
-[t-feature]: https://github.com/crvouga-organization/atlas/blob/main/.github/ISSUE_TEMPLATE/feature.md
+[t-bug]: https://github.com/crvouga/atlas/blob/main/.github/ISSUE_TEMPLATE/bug.md
+[t-feature]: https://github.com/crvouga/atlas/blob/main/.github/ISSUE_TEMPLATE/feature.md

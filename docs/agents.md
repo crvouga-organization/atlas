@@ -398,7 +398,7 @@ Found something wrong or missing? [Reporting issues](reporting-issues.md) says h
 Copy this into a task in the consumer repository; a server address and credentials can be supplied later if needed:
 
 ```text
-Integrate Atlas (https://github.com/crvouga-organization/atlas) into this project.
+Integrate Atlas (https://github.com/crvouga/atlas) into this project.
 Start with docs/agents.md in that repository, then install @crvouga/atlas with this project's
 existing package manager and use the installed version's documentation. Keep the current runners
 and product specs. Verify local publishing and gating with docs/quickstart.md, then connect the
@@ -415,7 +415,7 @@ For a catalog of the product's screens instead, give the agent this (the command
 [Capturing and reading the UI catalog](#capturing-and-reading-the-ui-catalog)):
 
 ```text
-Build a UI catalog for this project with Atlas (https://github.com/crvouga-organization/atlas). Install @crvouga/atlas with the
+Build a UI catalog for this project with Atlas (https://github.com/crvouga/atlas). Install @crvouga/atlas with the
 project's package manager and read docs/agents.md#capturing-and-reading-the-ui-catalog and docs/ui-catalog.md in the
 installed version. Keep the project's own browser or device runner; make it write one picture per screen and profile,
 with stable state ids. Publish what should exist with `atlas ui-catalog plan` and what was captured with
@@ -431,7 +431,7 @@ that the product's real suites are integrated.
 ## Resolve this repository's open issues
 
 For contributors working in this Atlas checkout, the
-[resolve-open-issues skill](https://github.com/crvouga-organization/atlas/blob/main/.agents/skills/resolve-open-issues/SKILL.md)
+[resolve-open-issues skill](https://github.com/crvouga/atlas/blob/main/.agents/skills/resolve-open-issues/SKILL.md)
 handles the entire open GitHub issue inventory in one PR, branch and worktree. It uses the
 [Agent Skills format](https://agentskills.io/specification) in the
 [shared `.agents/skills/` location](https://agentskills.io/integrate-skills#where-to-scan).

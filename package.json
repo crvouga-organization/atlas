@@ -10,11 +10,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/crvouga-organization/atlas.git"
+    "url": "git+https://github.com/crvouga/atlas.git"
   },
-  "homepage": "https://github.com/crvouga-organization/atlas#readme",
+  "homepage": "https://github.com/crvouga/atlas#readme",
   "bugs": {
-    "url": "https://github.com/crvouga-organization/atlas/issues"
+    "url": "https://github.com/crvouga/atlas/issues"
   },
   "keywords": [
     "test-reports",

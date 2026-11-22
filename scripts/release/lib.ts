@@ -3,7 +3,7 @@
  * the planning stays general over workspace packages so a second one would need no new code.
  *
  * Versions live in git tags, not in committed package.json files (the semantic-release model, and
- * the one crvouga-organization/mockingbird uses). Each public package is tagged `<name>@<version>` at the commit
+ * the one crvouga/mockingbird uses). Each public package is tagged `<name>@<version>` at the commit
  * it was released from; package.json keeps the `0.0.0-development` placeholder.
  *
  * A package is public when its manifest sets `publishConfig.access: "public"` and is not private.
@@ -23,8 +23,8 @@ import { must, run } from '../process.ts';
 
 /** The checkout being released. The seed points this at its clean copy of origin/main. */
 export const root = process.env.ATLAS_RELEASE_ROOT ? path.resolve(process.env.ATLAS_RELEASE_ROOT) : path.join(import.meta.dirname, '../..');
-export const REPO = 'crvouga-organization/atlas';
-/** npm scope/name prefix for this repo's packages (@crvouga/atlas*). */
+export const REPO = 'crvouga/atlas';
+/** npm scope/name prefix for this repo's packages (@crvouga/atlas*). It does not follow the GitHub owner. */
 export const NPM_PROJECT = 'crvouga/atlas';
 /** npm Trusted Publishing is pinned to this workflow filename. */
 export const WORKFLOW_FILE = 'ci.yml';

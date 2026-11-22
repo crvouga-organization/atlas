@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- The child chart: W3C SCXML. Readable names travel in atlas:name; a final state's
      atlas:done-event names the event the parent chart receives when checkout ends there. -->
-<scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:atlas="https://github.com/crvouga-organization/atlas/ns/1" version="1.0" name="Checkout" initial="choosing-how-to-pay" datamodel="null">
+<scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:atlas="https://github.com/crvouga/atlas/ns/1" version="1.0" name="Checkout" initial="choosing-how-to-pay" datamodel="null">
   <atlas:meta>
     <atlas:description>Paying for the order, by card or with a wallet.</atlas:description>
     <atlas:timeEvents>{"Payment takes longer than a minute": "1 minute"}</atlas:timeEvents>
