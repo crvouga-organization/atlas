@@ -1,5 +1,5 @@
 {
-  "$id": "https://github.com/crvouga-organization/atlas/schemas/command-error.schema.json",
+  "$id": "https://github.com/crvouga/atlas/schemas/command-error.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {

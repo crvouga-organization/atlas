@@ -75,7 +75,7 @@ export const GUIDES: readonly { readonly file: string; readonly section: string 
 ];
 
 const read = (file: string) => readFileSync(path.join(REPO, file), 'utf8');
-const RAW = 'https://raw.githubusercontent.com/crvouga-organization/atlas/main';
+const RAW = 'https://raw.githubusercontent.com/crvouga/atlas/main';
 
 /** The command line reference: the usage text of every command. */
 export const CLI_HELP = [

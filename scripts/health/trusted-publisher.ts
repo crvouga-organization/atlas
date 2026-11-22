@@ -2,10 +2,11 @@
  * Trusted Publisher health for every npm package associated with this repo.
  *
  * Association is the logged-in account's packages whose registry repository is
- * crvouga-organization/atlas (or its old name crvouga/atlas), plus every public workspace package (including one that
+ * crvouga/atlas (or crvouga-organization/atlas, its owner for a day in November 2026), plus every public
+ * workspace package (including one that
  * is not on npm yet). npm can only record a publisher on a package that already
  * exists, and direct `npm publish` from this repo's Release workflow needs a
- * GitHub Actions publisher for crvouga-organization/atlas, workflow ci.yml, with no
+ * GitHub Actions publisher for crvouga/atlas, workflow ci.yml, with no
  * environment and permission to publish (not stage-only). The fix is the
  * package access page.
  */
@@ -48,7 +49,7 @@ export type PackageTrust = {
 export type PublisherGap = 'missing' | 'stage-only' | 'environment' | 'not-published';
 
 const GAP_SUMMARY: Record<PublisherGap, string> = {
-  missing: `No GitHub Actions publisher for ${REPO} ${WORKFLOW_FILE}. On the access page add one and allow npm publish. Organization crvouga-organization, repository atlas, workflow filename ci.yml, environment empty.`,
+  missing: `No GitHub Actions publisher for ${REPO} ${WORKFLOW_FILE}. On the access page add one and allow npm publish. Organization crvouga, repository atlas, workflow filename ci.yml, environment empty.`,
   'stage-only': 'GitHub Actions publisher does not allow npm publish (stage only). On the access page, allow npm publish.',
   environment: 'GitHub Actions publisher is limited to an environment. The Release workflow sets none. On the access page, clear Environment and allow npm publish.',
   'not-published': 'Not on npm yet, so there is no access page until the interactive first publish (bun scripts/release/seed.ts).'
@@ -64,9 +65,11 @@ export function registryPackagePath(name: string): string {
 }
 
 /**
- * `github.com/crvouga-organization/atlas` or `github:crvouga-organization/atlas`, including
+ * `github.com/crvouga/atlas` or `github:crvouga/atlas`, including
  * `.git` and a trailing path. A longer repo name such as `atlas-extra`
- * does not match.
+ * does not match. The owner `crvouga-organization` matches too: versions
+ * published while the repo lived there name it, and both owners redirect to
+ * the same repository.
  */
 const PROJECT_REPOSITORY = /(?:^|[/:@])(?:github\.com[:/]|github:)crvouga(?:-organization)?\/atlas(?:\.git)?(?=$|[/#?])/;
 

@@ -124,7 +124,7 @@ describe('the guides', () => {
   });
 
   test('llms.txt links only to files that exist in the repository', () => {
-    const missing = [...read('llms.txt').matchAll(/\]\(https:\/\/raw\.githubusercontent\.com\/crvouga-organization\/atlas\/main\/([^)]+)\)/g)].map(match => match[1]!).filter(file => !existsSync(path.join(REPO, file)));
+    const missing = [...read('llms.txt').matchAll(/\]\(https:\/\/raw\.githubusercontent\.com\/crvouga\/atlas\/main\/([^)]+)\)/g)].map(match => match[1]!).filter(file => !existsSync(path.join(REPO, file)));
     expect(missing).toEqual([]);
   });
 

@@ -407,7 +407,7 @@ Found something wrong or missing? [Reporting issues](reporting-issues.md) says h
 Copy this into a task in the consumer repository; a server address and credentials can be supplied later if needed:
 
 ```text
-Integrate Atlas (https://github.com/crvouga-organization/atlas) into this project.
+Integrate Atlas (https://github.com/crvouga/atlas) into this project.
 Start with docs/agents.md in that repository, then install @crvouga/atlas with this project's
 existing package manager and use the installed version's documentation. Keep the current runners
 and product specs. Verify local publishing and gating with docs/quickstart.md, then connect the
@@ -424,7 +424,7 @@ For a catalog of the product's screens instead, give the agent this (the command
 [Capturing and reading the UI catalog](#capturing-and-reading-the-ui-catalog)):
 
 ```text
-Build a UI catalog for this project with Atlas (https://github.com/crvouga-organization/atlas). Install @crvouga/atlas with the
+Build a UI catalog for this project with Atlas (https://github.com/crvouga/atlas). Install @crvouga/atlas with the
 project's package manager and read docs/agents.md#capturing-and-reading-the-ui-catalog and docs/ui-catalog.md in the
 installed version. Keep the project's own browser or device runner; make it write one picture per screen and profile,
 with stable state ids. Publish what should exist with `atlas ui-catalog plan` and what was captured with
@@ -440,7 +440,7 @@ that the product's real suites are integrated.
 ## Resolve this repository's open issues
 
 For contributors working in this Atlas checkout, the
-[resolve-open-issues skill](https://github.com/crvouga-organization/atlas/blob/main/.agents/skills/resolve-open-issues/SKILL.md)
+[resolve-open-issues skill](https://github.com/crvouga/atlas/blob/main/.agents/skills/resolve-open-issues/SKILL.md)
 handles the entire open GitHub issue inventory in one PR, branch and worktree. It uses the
 [Agent Skills format](https://agentskills.io/specification) in the
 [shared `.agents/skills/` location](https://agentskills.io/integrate-skills#where-to-scan).
@@ -1671,7 +1671,7 @@ decisions behind it, the command line, and what stays in your project.
 Developing Atlas itself? `bun run dev` populates the todo example's catalog automatically, alongside its other reports.
 Choose **UI catalog** from the spec-type menu to browse seven states across desktop and mobile profiles, including
 empty, offline and pending-sync states. The collector is
-[`examples/todo/catalog.ts`](https://github.com/crvouga-organization/atlas/blob/main/examples/todo/catalog.ts): it starts its own isolated
+[`examples/todo/catalog.ts`](https://github.com/crvouga/atlas/blob/main/examples/todo/catalog.ts): it starts its own isolated
 app server, drives the real UI, publishes the expected set and screenshots, and closes its browser and server.
 
 Local development and the example preview also keep three **Status examples** available after collection completes:
@@ -2209,7 +2209,7 @@ atlas ui-catalog export --store merged/store --out catalog.html  # offline: no s
 ### A CI kit: plan, capture, finalize
 
 The kit composes the commands above; it schedules nothing. `plan-matrix` prints a fan-out of the definition, ready for a GitHub Actions
-matrix, and [`examples/ci/ui-catalog.yml`](https://github.com/crvouga-organization/atlas/blob/main/examples/ci/ui-catalog.yml) is a reusable workflow to copy into `.github/workflows/`:
+matrix, and [`examples/ci/ui-catalog.yml`](https://github.com/crvouga/atlas/blob/main/examples/ci/ui-catalog.yml) is a reusable workflow to copy into `.github/workflows/`:
 plan (and begin the refresh) → build once per mode → preflight (fails fast; its diagnostics are uploaded anyway) → capture fan-out →
 finalize (merge every attempt's bundle, import, export, finalize). The build, smoke and capture commands stay yours.
 
@@ -2553,10 +2553,10 @@ bunx atlas dev                               # http://127.0.0.1:5180 (same ATLAS
 ATLAS_STORE=http://127.0.0.1:5180 bunx atlas report publish --producer unit --junit out.xml
 ```
 
-For Railway, deploy `ghcr.io/crvouga-organization/atlas:latest` directly: the image contains the server and
+For Railway, deploy `ghcr.io/crvouga/atlas:latest` directly: the image contains the server and
 viewer, and every green `main` push updates it. See [running Atlas for a project](deploying.md#run-it) for
 Railway's variables, tokens, healthcheck and image auto updates, or for Docker, Kubernetes and CI.
-For anonymous reading, uploads and administration, use `ghcr.io/crvouga-organization/atlas-insecure:latest` with no tokens
+For anonymous reading, uploads and administration, use `ghcr.io/crvouga/atlas-insecure:latest` with no tokens
 configured; see [deploying without authentication](deploying.md#deploy-without-authentication).
 
 ## Required S3 storage
@@ -2576,7 +2576,7 @@ local-disk, in-memory or database fallback and no flag to choose another place, 
 | `ATLAS_S3_PATH_STYLE` | no | `1` (default) for `endpoint/bucket/key`, `0` for virtual-hosted `bucket.endpoint/key` |
 | `ATLAS_S3_SESSION_TOKEN` | no | Only for temporary credentials |
 
-[`.env.example`](https://github.com/crvouga-organization/atlas/blob/main/.env.example) lists them with explanations. The server does not look for
+[`.env.example`](https://github.com/crvouga/atlas/blob/main/.env.example) lists them with explanations. The server does not look for
 ambient AWS credentials (`AWS_*`, profiles, instance roles) and the old `ATLAS_STORE`, `ATLAS_WRITE`, `ATLAS_DATA`,
 `--store`, `--write`, `--data` and the `data`, `backends` and `write` keys of `atlas.server.json` are gone; a
 configuration file that still has one of the keys is refused with a message that says so.
@@ -2619,7 +2619,7 @@ Everything a person using Atlas has chosen is **user state**: one JSON document,
 }
 ```
 
-(published as [`user-state.schema.json`](https://github.com/crvouga-organization/atlas/blob/main/packages/schema/schemas/user-state.schema.json))
+(published as [`user-state.schema.json`](https://github.com/crvouga/atlas/blob/main/packages/schema/schemas/user-state.schema.json))
 
 - **`gc` is the garbage collection policy**, defined in the Atlas UI (**Settings**, `/admin`, *Garbage collection*) and
   read by the server **from S3 every time it collects**, so a saved policy applies at the next pass without a restart.
@@ -2662,7 +2662,7 @@ Everything but the [S3 storage](#required-s3-storage) has a default. Settings co
 `atlas.server.json` (or `--config <file>` / `ATLAS_CONFIG`), then environment variables, then flags; a later one
 wins. A mistake (an unknown key, a short token, listening beyond this machine without tokens)
 is said in words and the server does not start. The file has a published
-[JSON Schema](https://github.com/crvouga-organization/atlas/blob/main/packages/schema/schemas/server-config.schema.json)
+[JSON Schema](https://github.com/crvouga/atlas/blob/main/packages/schema/schemas/server-config.schema.json)
 (`@crvouga/atlas/schemas/server-config.schema.json`).
 
 ```json
@@ -3264,7 +3264,7 @@ Why this holds together:
 **The server keeps everything in one S3-compatible bucket** (reports and user state, such as the garbage collection
 policy), set by the required `ATLAS_S3_ENDPOINT`, `ATLAS_S3_BUCKET`, `ATLAS_S3_REGION`, `ATLAS_S3_ACCESS_KEY_ID` and
 `ATLAS_S3_SECRET_ACCESS_KEY` variables ([details](server.md#required-s3-storage), template in
-[`.env.example`](https://github.com/crvouga-organization/atlas/blob/main/.env.example)). Without them it refuses to start, listing
+[`.env.example`](https://github.com/crvouga/atlas/blob/main/.env.example)). Without them it refuses to start, listing
 every variable and what is wrong. There is no disk or database to fall back to, so the server is replaceable:
 a new one started on the same bucket shows the same report.
 
@@ -3348,7 +3348,7 @@ The result is in everyone's view within a few milliseconds, with no bucket crede
 artifacts to merge. To show a long suite *while it runs*, stream it: `my-suite --json | atlas report stream
 --producer e2e --environment ios` ([sending results](server.md#sending-results)). The gate asks the server for the
 verdict, so only the verdict travels: `atlas report status --branch main --ignore-modified`.
-[`examples/deploy/github-actions.yml`](https://github.com/crvouga-organization/atlas/blob/main/examples/deploy/github-actions.yml)
+[`examples/deploy/github-actions.yml`](https://github.com/crvouga/atlas/blob/main/examples/deploy/github-actions.yml)
 is the whole workflow, publishers and gate. The rest of this section is publishing straight to a bucket, for
 CI that has bucket access and no route to the server.
 
@@ -3439,17 +3439,17 @@ permissions (`atlas report policy` prints a least-privilege policy; delete is fo
 ### Run it
 
 **Railway (deploy an image, no repository or code changes).** Create a service from the Docker image
-`ghcr.io/crvouga-organization/atlas:latest`. Copy the URI below into Railway's image field:
+`ghcr.io/crvouga/atlas:latest`. Copy the URI below into Railway's image field:
 
 ```text
-ghcr.io/crvouga-organization/atlas:latest
+ghcr.io/crvouga/atlas:latest
 ```
 
-For a specific revision, open a [CI run](https://github.com/crvouga-organization/atlas/actions/workflows/ci.yml)'s
+For a specific revision, open a [CI run](https://github.com/crvouga/atlas/actions/workflows/ci.yml)'s
 **Summary → Atlas CI**: it includes the published commit image URI, immutable digest and whether that run
 updated `latest`. Pull request builds and failed publications are labelled accordingly.
 
-1. In Railway choose **New service → Docker image** and enter `ghcr.io/crvouga-organization/atlas:latest`.
+1. In Railway choose **New service → Docker image** and enter `ghcr.io/crvouga/atlas:latest`.
    Leave the start command unset: the image includes the server and the prebuilt viewer.
 2. Add `ATLAS_TOKEN` with a long random value (generate one with `openssl rand -hex 24`). It grants admin
    access; optionally add separate `ATLAS_PUBLISH_TOKEN` and `ATLAS_READ_TOKEN` for publishers and readers.
@@ -3474,8 +3474,8 @@ Then open `/admin` to define the garbage collection policy; until you save one, 
 
 ### Deploy without authentication
 
-Use `ghcr.io/crvouga-organization/atlas-insecure:latest` for a server that requires no sign-in or API token. It is built
-from the same commit, server and viewer as `ghcr.io/crvouga-organization/atlas:latest`, with `ATLAS_INSECURE=true`
+Use `ghcr.io/crvouga/atlas-insecure:latest` for a server that requires no sign-in or API token. It is built
+from the same commit, server and viewer as `ghcr.io/crvouga/atlas:latest`, with `ATLAS_INSECURE=true`
 to allow listening on the network without tokens. Anonymous callers have full read, publish and admin access.
 Anyone who discovers an unlisted URL can read reports, upload results and change settings; the URL is
 not access control.
@@ -3483,7 +3483,7 @@ not access control.
 In Railway, create a **Docker image** service with:
 
 ```text
-ghcr.io/crvouga-organization/atlas-insecure:latest
+ghcr.io/crvouga/atlas-insecure:latest
 ```
 
 Leave the start command unset. Add the required `ATLAS_S3_*` storage variables, keep one
@@ -3511,12 +3511,12 @@ leave its `ATLAS_TOKEN` unset. Use the same publishing commands described in
 For local Docker:
 
 ```sh
-docker run --pull always -p 8080:8080 --env-file .env ghcr.io/crvouga-organization/atlas-insecure:latest
+docker run --pull always -p 8080:8080 --env-file .env ghcr.io/crvouga/atlas-insecure:latest
 ```
 
 Both images publish full commit tags for pinning or rollback. A new GHCR package must be made Public
 once before Railway can pull without registry credentials; see
-[image publication](https://github.com/crvouga-organization/atlas/blob/main/docs/releasing.md#server-image).
+[image publication](https://github.com/crvouga/atlas/blob/main/docs/releasing.md#server-image).
 
 ### Docker
 
@@ -3526,12 +3526,12 @@ for every project: the server tells the page where its data is), and keeps nothi
 
 ```sh
 docker run --pull always -p 8080:8080 --env-file .env \
-  -e ATLAS_TOKEN=$(openssl rand -hex 24) ghcr.io/crvouga-organization/atlas:latest
+  -e ATLAS_TOKEN=$(openssl rand -hex 24) ghcr.io/crvouga/atlas:latest
 ```
 
 The image is built from each checked commit, independently of npm releases. To pin a deployment or roll
 back, replace `latest` with the full commit SHA. To build from this repository, use `docker build -t atlas .`;
-[`examples/deploy/Dockerfile`](https://github.com/crvouga-organization/atlas/blob/main/examples/deploy/Dockerfile) is the
+[`examples/deploy/Dockerfile`](https://github.com/crvouga/atlas/blob/main/examples/deploy/Dockerfile) is the
 alternative for building from an npm version or a local package tarball.
 
 #### Which build is running
@@ -3552,11 +3552,11 @@ curl -s https://YOUR-DOMAIN/api/server -H "Authorization: Bearer $ATLAS_READ_TOK
 The bucket's account needs the combined **both** policy (including `server/live/*` for producer leases and `server/state.json`
 for user state) plus `s3:DeleteObject` for garbage collection. The server does not use ambient AWS roles: pass the keys.
 
-**Try it on one machine.** [`examples/deploy/compose.yaml`](https://github.com/crvouga-organization/atlas/blob/main/examples/deploy/compose.yaml)
+**Try it on one machine.** [`examples/deploy/compose.yaml`](https://github.com/crvouga/atlas/blob/main/examples/deploy/compose.yaml)
 starts the published image with an S3 server (SeaweedFS) and a bucket as its storage; `compose.s3.yaml` is the same stack without tokens.
 Publish to `http://localhost:8080` from your project and open it.
 
-**Kubernetes.** [`examples/deploy/kubernetes.yaml`](https://github.com/crvouga-organization/atlas/blob/main/examples/deploy/kubernetes.yaml):
+**Kubernetes.** [`examples/deploy/kubernetes.yaml`](https://github.com/crvouga/atlas/blob/main/examples/deploy/kubernetes.yaml):
 one copy (the server is a singleton for the project), results in the bucket (keys from a Secret), readiness on `/readyz`.
 
 **Without a container.** `bun add -d @crvouga/atlas`, then `bunx atlas client build --no-data --out
@@ -4806,7 +4806,7 @@ higher-is-better. The address holds the critic, the state kind and the open entr
 
 ## What is not here yet
 
-Out of scope until the open questions of [issue 50](https://github.com/crvouga-organization/atlas/issues/50) are settled, because they need the
+Out of scope until the open questions of [issue 50](https://github.com/crvouga/atlas/issues/50) are settled, because they need the
 weights, a license or a network that this repository does not have:
 
 - the **UIClip critic's parity** with the in-house package it is meant to absorb: its exact preprocessing and score head, checked
@@ -4848,7 +4848,7 @@ and the implementation says how a driver makes each event happen and recognises 
 
 ## Quick start: the todo example
 
-[`examples/todo`](https://github.com/crvouga-organization/atlas/tree/main/examples/todo) is a dependency-free web app (static HTML and vanilla JavaScript
+[`examples/todo`](https://github.com/crvouga/atlas/tree/main/examples/todo) is a dependency-free web app (static HTML and vanilla JavaScript
 served by a small Node server) specified as two charts:
 
 - `specs/todo-app.scxml`, the root chart in SCXML: a welcome screen, a "Setting up" state that
@@ -4921,7 +4921,7 @@ Manifest: examples/todo/atlas-runs/<run-id>/manifest.json
 
 `example:run` then runs the Gherkin features in a browser and the Quint model, and streams every scenario and trace as it runs, including sharing and renaming. The final recordings are uploaded alongside the completed statechart run.
 
-`bun test examples` runs [`model.test.ts`](https://github.com/crvouga-organization/atlas/blob/main/examples/todo/model.test.ts): the same charts and journeys
+`bun test examples` runs [`model.test.ts`](https://github.com/crvouga/atlas/blob/main/examples/todo/model.test.ts): the same charts and journeys
 against `TodoModel`, a plain class, through `functionDriver` and `describeAtlas`. Only the driver
 and the implementation differ, which is the point: the spec belongs to the product, not to one
 test tool.
@@ -4977,7 +4977,7 @@ SCXML ids are XML IDs and event attributes are token lists, so business names tr
 `atlas:name` attribute next to a token id. Metadata lives in the `atlas` namespace, as SCXML allows:
 
 ```xml
-<scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:atlas="https://github.com/crvouga-organization/atlas/ns/1"
+<scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:atlas="https://github.com/crvouga/atlas/ns/1"
        version="1.0" datamodel="null" name="Todo app" initial="welcome">
   <state id="welcome" atlas:name="Welcome">
     <atlas:meta>
@@ -5249,7 +5249,7 @@ export default defineConfig<Clients>({
 - If one client cannot open (no simulator booted), the others are closed and the attempt fails
   naming that client.
 
-[`examples/todo/clients`](https://github.com/crvouga-organization/atlas/tree/main/examples/todo/clients) runs a chart (`specs/clients/shared-list.scxml`)
+[`examples/todo/clients`](https://github.com/crvouga/atlas/tree/main/examples/todo/clients) runs a chart (`specs/clients/shared-list.scxml`)
 across a phone, a desktop and the sync server; pick each device's driver with `ATLAS_PHONE` and
 `ATLAS_DESKTOP` (`playwright`, `bun` or `webdriver`).
 
@@ -5550,7 +5550,7 @@ The lower-level workflows remain available through their source files instead of
 `bun scripts/examples.ts all` runs both example suites against an existing server; `run` and `clients` select one.
 `bun examples/todo/publish.ts` uploads already-recorded results without rerunning suites. Spec linting, planning and
 fast-mode execution use the existing Atlas CLI, as described in [statecharts](statecharts.md).
-Release and health maintenance use `scripts/release/*.ts` and `scripts/health/cli.ts`; see [releasing](https://github.com/crvouga-organization/atlas/blob/main/docs/releasing.md).
+Release and health maintenance use `scripts/release/*.ts` and `scripts/health/cli.ts`; see [releasing](https://github.com/crvouga/atlas/blob/main/docs/releasing.md).
 Viewer fixture generation and data publishing remain `packages/visualizer/scripts/make-fixtures.ts` and
 `packages/visualizer/scripts/publish-data.ts`.
 
@@ -5571,7 +5571,7 @@ bun run dev --status
 
 Everything binds to `127.0.0.1`; use IDE port forwarding, `bun run dev --share` or SSH remotely (see [viewing it from another machine](#viewing-it-from-another-machine)). Atlas still reads and writes reports and user
 state through S3 only. With no `ATLAS_S3_*` configuration, dev starts
-[Mockingbird S3](https://github.com/crvouga-organization/mockingbird/tree/main/packages/service/s3) on an ephemeral loopback port,
+[Mockingbird S3](https://github.com/crvouga/mockingbird/tree/main/packages/service/s3) on an ephemeral loopback port,
 creates its bucket, and persists the emulator's objects and metadata in `.atlas-workspace/s3/storage.sqlite`
 using Bun's file-backed SQLite (WAL, synchronous commits). Its development credentials are `fixture` / `fixture`,
 and it validates signed S3 requests. No Docker daemon or external storage service is needed.
@@ -5595,12 +5595,12 @@ owner PID is gone. An unauthenticated live owner must be investigated, never kil
 
 ## IDE configuration
 
-[`.superset/config.json`](https://github.com/crvouga-organization/atlas/blob/main/.superset/config.json) uses `dev --setup`, `dev`
+[`.superset/config.json`](https://github.com/crvouga/atlas/blob/main/.superset/config.json) uses `dev --setup`, `dev`
 and `dev --stop` for setup, Run and teardown. Personal overrides stay in ignored `.superset/config.local.json`.
 Superset resolves Run from the main repository's config: commit scripts and configuration together before expecting
 another workspace to discover them. See its [lifecycle guide](https://docs.superset.sh/setup-teardown-scripts).
 
-[`.super.engineering/config.json`](https://github.com/crvouga-organization/atlas/blob/main/.super.engineering/config.json) presents
+[`.super.engineering/config.json`](https://github.com/crvouga/atlas/blob/main/.super.engineering/config.json) presents
 one **Dev** target and the CI targets **Check**, **Test**, **Build**, **Docs** and **Smoke**. Dev is the default;
 Docs runs `docs --check`. Setup and teardown use the same dev modes as the other IDEs. Existing preview, status and
 review workflows remain available through dev flags and [UI conventions](ui.md), without duplicate shortcuts.
@@ -5617,7 +5617,7 @@ sc project scripts stop Dev --json
 Edit scripts with `sc project scripts set ... --scope repo` and shared commands with `sc commands ... --scope shared`;
 preserve unknown fields. See [project configuration](https://super.engineering/docs/project-config-and-scripts/).
 
-[`orca.yaml`](https://github.com/crvouga-organization/atlas/blob/main/orca.yaml) keeps `scripts.setup`, `scripts.archive` and
+[`orca.yaml`](https://github.com/crvouga/atlas/blob/main/orca.yaml) keeps `scripts.setup`, `scripts.archive` and
 `setupAgentStartupPolicy: wait-for-setup`. Its first tab is reserved for the agent; the second runs `bun run dev`.
 No unsupported `scripts.run` key is added. Keep Shared + Local or Shared only enabled for repository hooks and approve
 Orca's shared-config trust prompt when offered. These are user-owned settings. Existing workspaces can run the same
@@ -5626,7 +5626,7 @@ Bun command in a terminal; default tabs apply to new workspaces. See the [Orca r
 ### T3 Code
 
 T3 Code keeps project scripts in its own settings, not in the repository, so it does not read a file by itself.
-[`.t3code/project.json`](https://github.com/crvouga-organization/atlas/blob/main/.t3code/project.json) holds Atlas's settings in
+[`.t3code/project.json`](https://github.com/crvouga/atlas/blob/main/.t3code/project.json) holds Atlas's settings in
 exactly the shape T3's project settings take: worktree threads by default and about twenty scripts. Every script calls
 the shared `bun run dev` lifecycle or a repository check, with no machine-specific paths, so one file serves every
 machine. To apply it on a machine, ask an agent in a T3 thread of the Atlas project: *"Apply .t3code/project.json to
@@ -6403,7 +6403,7 @@ part of its interface.
 ## Upgrade
 
 Every releasable change that lands on Atlas's `main` is published within minutes; nobody cuts
-releases by hand ([releasing.md](https://github.com/crvouga-organization/atlas/blob/main/docs/releasing.md)). There is one package and one version, so an upgrade
+releases by hand ([releasing.md](https://github.com/crvouga/atlas/blob/main/docs/releasing.md)). There is one package and one version, so an upgrade
 is one line:
 
 ```sh
@@ -6420,7 +6420,7 @@ npm view @crvouga/atlas version                       # the newest release
 cat node_modules/@crvouga/atlas/CHANGELOG.md          # every release up to the version you have
 ```
 
-Each release is also a [GitHub Release](https://github.com/crvouga-organization/atlas/releases) with the same
+Each release is also a [GitHub Release](https://github.com/crvouga/atlas/releases) with the same
 notes. Versions follow semver; a breaking change is a major version, and its notes say what to
 change.
 
@@ -6540,7 +6540,7 @@ when you cannot tell.
 4. File it:
 
    ```sh
-   gh issue create --repo crvouga-organization/atlas \
+   gh issue create --repo crvouga/atlas \
      --title "[core] bug: plan skips a transition guarded by a parallel region" \
      --label agent-reported,bug \
      --body-file issue.md
@@ -6589,7 +6589,7 @@ When you cannot show the problem without something on this list, stop and ask yo
 ## 1. Search first
 
 ```sh
-gh issue list --repo crvouga-organization/atlas --state all --search "<part> <what breaks or is missing> in:title,body"
+gh issue list --repo crvouga/atlas --state all --search "<part> <what breaks or is missing> in:title,body"
 ```
 
 If an open issue covers the same thing, add a comment with your evidence (versions, reproduction,
@@ -6640,7 +6640,7 @@ Copy the template for the kind, fill in every section, delete the HTML comments,
 file. Then run:
 
 ```sh
-gh issue create --repo crvouga-organization/atlas \
+gh issue create --repo crvouga/atlas \
   --title "<title in the format from the quick reference>" \
   --label agent-reported,<kind> \
   --body-file issue.md
@@ -6648,14 +6648,14 @@ gh issue create --repo crvouga-organization/atlas \
 
 | Kind | Template (raw, for copying) |
 | --- | --- |
-| `bug` | <https://raw.githubusercontent.com/crvouga-organization/atlas/main/.github/ISSUE_TEMPLATE/bug.md> |
-| `feature` | <https://raw.githubusercontent.com/crvouga-organization/atlas/main/.github/ISSUE_TEMPLATE/feature.md> |
+| `bug` | <https://raw.githubusercontent.com/crvouga/atlas/main/.github/ISSUE_TEMPLATE/bug.md> |
+| `feature` | <https://raw.githubusercontent.com/crvouga/atlas/main/.github/ISSUE_TEMPLATE/feature.md> |
 
 Each template begins with a `---` front-matter block; leave it out of the body file.
 
 If `gh` is not installed or not authenticated, do not install it or log in on your own. Give your
 human the finished title and body and the link to the matching form, for example
-<https://github.com/crvouga-organization/atlas/issues/new?template=bug.md>.
+<https://github.com/crvouga/atlas/issues/new?template=bug.md>.
 
 ## What happens next
 
@@ -6671,8 +6671,8 @@ An issue labelled `needs-info` is waiting on you: answer the question in the com
 Merging the fix publishes it. The release then comments on the issue with the exact version that
 carries it. Upgrade (`bun update @crvouga/atlas --latest`) and remove your workaround.
 
-[t-bug]: https://github.com/crvouga-organization/atlas/blob/main/.github/ISSUE_TEMPLATE/bug.md
-[t-feature]: https://github.com/crvouga-organization/atlas/blob/main/.github/ISSUE_TEMPLATE/feature.md
+[t-bug]: https://github.com/crvouga/atlas/blob/main/.github/ISSUE_TEMPLATE/bug.md
+[t-feature]: https://github.com/crvouga/atlas/blob/main/.github/ISSUE_TEMPLATE/feature.md
 </doc>
 
 <doc path="docs/reference/cli.md">

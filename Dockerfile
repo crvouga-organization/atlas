@@ -26,7 +26,7 @@ RUN bun install --production --frozen-lockfile --ignore-scripts
 FROM runtime-dependencies AS runtime
 ARG ATLAS_REVISION=unknown
 ARG ATLAS_BUILD_TIME=
-LABEL org.opencontainers.image.source="https://github.com/crvouga-organization/atlas" \
+LABEL org.opencontainers.image.source="https://github.com/crvouga/atlas" \
       org.opencontainers.image.description="Atlas report server and live viewer" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.revision="${ATLAS_REVISION}" \

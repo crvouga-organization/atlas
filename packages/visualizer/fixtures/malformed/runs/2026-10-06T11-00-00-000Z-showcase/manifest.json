@@ -1,5 +1,5 @@
 {
-  "$schema": "https://github.com/crvouga-organization/atlas/schemas/manifest.schema.json",
+  "$schema": "https://github.com/crvouga/atlas/schemas/manifest.schema.json",
   "schemaVersion": 2,
   "run": {
     "id": "2026-10-06T11-00-00-000Z-showcase",

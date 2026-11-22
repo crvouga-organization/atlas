@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:atlas="https://github.com/crvouga-organization/atlas/ns/1" version="1.0" name="Payment" datamodel="null" initial="handling-the-payment-details">
+<scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:atlas="https://github.com/crvouga/atlas/ns/1" version="1.0" name="Payment" datamodel="null" initial="handling-the-payment-details">
   <atlas:meta>
     <atlas:description>The payment, a step inside order checkout.</atlas:description>
     <atlas:snapshot>payment</atlas:snapshot>

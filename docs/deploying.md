@@ -39,7 +39,7 @@ Why this holds together:
 **The server keeps everything in one S3-compatible bucket** (reports and user state, such as the garbage collection
 policy), set by the required `ATLAS_S3_ENDPOINT`, `ATLAS_S3_BUCKET`, `ATLAS_S3_REGION`, `ATLAS_S3_ACCESS_KEY_ID` and
 `ATLAS_S3_SECRET_ACCESS_KEY` variables ([details](server.md#required-s3-storage), template in
-[`.env.example`](https://github.com/crvouga-organization/atlas/blob/main/.env.example)). Without them it refuses to start, listing
+[`.env.example`](https://github.com/crvouga/atlas/blob/main/.env.example)). Without them it refuses to start, listing
 every variable and what is wrong. There is no disk or database to fall back to, so the server is replaceable:
 a new one started on the same bucket shows the same report.
 
@@ -123,7 +123,7 @@ The result is in everyone's view within a few milliseconds, with no bucket crede
 artifacts to merge. To show a long suite *while it runs*, stream it: `my-suite --json | atlas report stream
 --producer e2e --environment ios` ([sending results](server.md#sending-results)). The gate asks the server for the
 verdict, so only the verdict travels: `atlas report status --branch main --ignore-modified`.
-[`examples/deploy/github-actions.yml`](https://github.com/crvouga-organization/atlas/blob/main/examples/deploy/github-actions.yml)
+[`examples/deploy/github-actions.yml`](https://github.com/crvouga/atlas/blob/main/examples/deploy/github-actions.yml)
 is the whole workflow, publishers and gate. The rest of this section is publishing straight to a bucket, for
 CI that has bucket access and no route to the server.
 
@@ -214,17 +214,17 @@ permissions (`atlas report policy` prints a least-privilege policy; delete is fo
 ### Run it
 
 **Railway (deploy an image, no repository or code changes).** Create a service from the Docker image
-`ghcr.io/crvouga-organization/atlas:latest`. Copy the URI below into Railway's image field:
+`ghcr.io/crvouga/atlas:latest`. Copy the URI below into Railway's image field:
 
 ```text
-ghcr.io/crvouga-organization/atlas:latest
+ghcr.io/crvouga/atlas:latest
 ```
 
-For a specific revision, open a [CI run](https://github.com/crvouga-organization/atlas/actions/workflows/ci.yml)'s
+For a specific revision, open a [CI run](https://github.com/crvouga/atlas/actions/workflows/ci.yml)'s
 **Summary → Atlas CI**: it includes the published commit image URI, immutable digest and whether that run
 updated `latest`. Pull request builds and failed publications are labelled accordingly.
 
-1. In Railway choose **New service → Docker image** and enter `ghcr.io/crvouga-organization/atlas:latest`.
+1. In Railway choose **New service → Docker image** and enter `ghcr.io/crvouga/atlas:latest`.
    Leave the start command unset: the image includes the server and the prebuilt viewer.
 2. Add `ATLAS_TOKEN` with a long random value (generate one with `openssl rand -hex 24`). It grants admin
    access; optionally add separate `ATLAS_PUBLISH_TOKEN` and `ATLAS_READ_TOKEN` for publishers and readers.
@@ -249,8 +249,8 @@ Then open `/admin` to define the garbage collection policy; until you save one, 
 
 ### Deploy without authentication
 
-Use `ghcr.io/crvouga-organization/atlas-insecure:latest` for a server that requires no sign-in or API token. It is built
-from the same commit, server and viewer as `ghcr.io/crvouga-organization/atlas:latest`, with `ATLAS_INSECURE=true`
+Use `ghcr.io/crvouga/atlas-insecure:latest` for a server that requires no sign-in or API token. It is built
+from the same commit, server and viewer as `ghcr.io/crvouga/atlas:latest`, with `ATLAS_INSECURE=true`
 to allow listening on the network without tokens. Anonymous callers have full read, publish and admin access.
 Anyone who discovers an unlisted URL can read reports, upload results and change settings; the URL is
 not access control.
@@ -258,7 +258,7 @@ not access control.
 In Railway, create a **Docker image** service with:
 
 ```text
-ghcr.io/crvouga-organization/atlas-insecure:latest
+ghcr.io/crvouga/atlas-insecure:latest
 ```
 
 Leave the start command unset. Add the required `ATLAS_S3_*` storage variables, keep one
@@ -286,12 +286,12 @@ leave its `ATLAS_TOKEN` unset. Use the same publishing commands described in
 For local Docker:
 
 ```sh
-docker run --pull always -p 8080:8080 --env-file .env ghcr.io/crvouga-organization/atlas-insecure:latest
+docker run --pull always -p 8080:8080 --env-file .env ghcr.io/crvouga/atlas-insecure:latest
 ```
 
 Both images publish full commit tags for pinning or rollback. A new GHCR package must be made Public
 once before Railway can pull without registry credentials; see
-[image publication](https://github.com/crvouga-organization/atlas/blob/main/docs/releasing.md#server-image).
+[image publication](https://github.com/crvouga/atlas/blob/main/docs/releasing.md#server-image).
 
 ### Docker
 
@@ -301,12 +301,12 @@ for every project: the server tells the page where its data is), and keeps nothi
 
 ```sh
 docker run --pull always -p 8080:8080 --env-file .env \
-  -e ATLAS_TOKEN=$(openssl rand -hex 24) ghcr.io/crvouga-organization/atlas:latest
+  -e ATLAS_TOKEN=$(openssl rand -hex 24) ghcr.io/crvouga/atlas:latest
 ```
 
 The image is built from each checked commit, independently of npm releases. To pin a deployment or roll
 back, replace `latest` with the full commit SHA. To build from this repository, use `docker build -t atlas .`;
-[`examples/deploy/Dockerfile`](https://github.com/crvouga-organization/atlas/blob/main/examples/deploy/Dockerfile) is the
+[`examples/deploy/Dockerfile`](https://github.com/crvouga/atlas/blob/main/examples/deploy/Dockerfile) is the
 alternative for building from an npm version or a local package tarball.
 
 #### Which build is running
@@ -327,11 +327,11 @@ curl -s https://YOUR-DOMAIN/api/server -H "Authorization: Bearer $ATLAS_READ_TOK
 The bucket's account needs the combined **both** policy (including `server/live/*` for producer leases and `server/state.json`
 for user state) plus `s3:DeleteObject` for garbage collection. The server does not use ambient AWS roles: pass the keys.
 
-**Try it on one machine.** [`examples/deploy/compose.yaml`](https://github.com/crvouga-organization/atlas/blob/main/examples/deploy/compose.yaml)
+**Try it on one machine.** [`examples/deploy/compose.yaml`](https://github.com/crvouga/atlas/blob/main/examples/deploy/compose.yaml)
 starts the published image with an S3 server (SeaweedFS) and a bucket as its storage; `compose.s3.yaml` is the same stack without tokens.
 Publish to `http://localhost:8080` from your project and open it.
 
-**Kubernetes.** [`examples/deploy/kubernetes.yaml`](https://github.com/crvouga-organization/atlas/blob/main/examples/deploy/kubernetes.yaml):
+**Kubernetes.** [`examples/deploy/kubernetes.yaml`](https://github.com/crvouga/atlas/blob/main/examples/deploy/kubernetes.yaml):
 one copy (the server is a singleton for the project), results in the bucket (keys from a Secret), readiness on `/readyz`.
 
 **Without a container.** `bun add -d @crvouga/atlas`, then `bunx atlas client build --no-data --out

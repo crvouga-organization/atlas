@@ -56,7 +56,7 @@ states:
 `;
 
 const CHILD_SCXML = `<?xml version="1.0" encoding="UTF-8"?>
-<scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:atlas="https://github.com/crvouga-organization/atlas/ns/1" version="1.0" name="Ordering flow" initial="picking-a-drink">
+<scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:atlas="https://github.com/crvouga/atlas/ns/1" version="1.0" name="Ordering flow" initial="picking-a-drink">
   <state id="picking-a-drink" atlas:name="Picking a drink">
     <atlas:meta><atlas:description>Drinks.</atlas:description></atlas:meta>
     <transition event="picks-a-drink" atlas:name="Picks a drink" target="confirming-the-drink"/>

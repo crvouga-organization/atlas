@@ -127,6 +127,6 @@ then publish fresh captures after changes. A missing capture is unknown, and a s
 - **Failures are evidence: publish them.** Run the suite, ignore its exit code, publish, then gate.
 - **Layers are immutable** and named by their content: re-publishing is safe, and a retry never makes a duplicate.
 - Uploads go to the backend \`${context.write}\`. Read \`${url}/api/server\` for the backends and what this server can do (\`capabilities\`).
-- Evidence (screenshots, videos, traces, logs, steps, annotations, your own data) rides on checks: see https://github.com/crvouga-organization/atlas/blob/main/docs/extending.md
+- Evidence (screenshots, videos, traces, logs, steps, annotations, your own data) rides on checks: see https://github.com/crvouga/atlas/blob/main/docs/extending.md
 `;
 }

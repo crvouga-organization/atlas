@@ -6,52 +6,52 @@ Given only the repository link, start at docs/agents.md: install `@crvouga/atlas
 
 ## Start here
 
-- [Atlas for AI agents](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/agents.md): Start here when given the Atlas repository link to integrate it into another project.
-- [Verify Atlas locally](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/quickstart.md): Prove that the installed Atlas can publish, combine and gate evidence before connecting your project's real suites.
-- [Integrating Atlas into a project](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/integrating.md): This guide takes a project from nothing to a layered, gated report of its specs.
-- [Native test runner reporters](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/runners.md): Projects upload results to a shared Atlas node under their own project slug.
-- [Send rich evidence](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/rich-evidence.md): A check that says only its title and passed answers one question:
-- [The UI catalog](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/ui-catalog.md): A browsable inventory of a product's user interface:
+- [Atlas for AI agents](https://raw.githubusercontent.com/crvouga/atlas/main/docs/agents.md): Start here when given the Atlas repository link to integrate it into another project.
+- [Verify Atlas locally](https://raw.githubusercontent.com/crvouga/atlas/main/docs/quickstart.md): Prove that the installed Atlas can publish, combine and gate evidence before connecting your project's real suites.
+- [Integrating Atlas into a project](https://raw.githubusercontent.com/crvouga/atlas/main/docs/integrating.md): This guide takes a project from nothing to a layered, gated report of its specs.
+- [Native test runner reporters](https://raw.githubusercontent.com/crvouga/atlas/main/docs/runners.md): Projects upload results to a shared Atlas node under their own project slug.
+- [Send rich evidence](https://raw.githubusercontent.com/crvouga/atlas/main/docs/rich-evidence.md): A check that says only its title and passed answers one question:
+- [The UI catalog](https://raw.githubusercontent.com/crvouga/atlas/main/docs/ui-catalog.md): A browsable inventory of a product's user interface:
 
 ## Run and use the server
 
-- [The Atlas server](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/server.md): One node for multiple projects that takes in results from every environment, keeps them, and shows everyone the combined report, live.
-- [Running Atlas for a project: one server](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/deploying.md): This is the production setup. A project runs one Atlas server.
+- [The Atlas server](https://raw.githubusercontent.com/crvouga/atlas/main/docs/server.md): One node for multiple projects that takes in results from every environment, keeps them, and shows everyone the combined report, live.
+- [Running Atlas for a project: one server](https://raw.githubusercontent.com/crvouga/atlas/main/docs/deploying.md): This is the production setup. A project runs one Atlas server.
 
 ## Formats and rules
 
-- [The report contract](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/report-contract.md): This is the normative description of what Atlas reads and writes when it reports on specs of any kind:
-- [Evidence: attachments, timelines, snapshots and everything else](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/extending.md): Atlas is opinionated about specs and open about evidence.
-- [Critics: automated reviewers that mark which UIs need polish](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/critics.md): A critic looks at one captured UI (an image and what is known about it) and says how polished it is, and ideally where and why it is not.
-- [docs/report-backends.md](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/report-backends.md): 
-- [Executable statecharts](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/statecharts.md): Write down how a product behaves as statecharts in open formats, then let Atlas lint them, plan paths that cover every transition, run those paths against the real product through any driver (a browser, a phone, a pla…
+- [The report contract](https://raw.githubusercontent.com/crvouga/atlas/main/docs/report-contract.md): This is the normative description of what Atlas reads and writes when it reports on specs of any kind:
+- [Evidence: attachments, timelines, snapshots and everything else](https://raw.githubusercontent.com/crvouga/atlas/main/docs/extending.md): Atlas is opinionated about specs and open about evidence.
+- [Critics: automated reviewers that mark which UIs need polish](https://raw.githubusercontent.com/crvouga/atlas/main/docs/critics.md): A critic looks at one captured UI (an image and what is known about it) and says how polished it is, and ideally where and why it is not.
+- [docs/report-backends.md](https://raw.githubusercontent.com/crvouga/atlas/main/docs/report-backends.md): 
+- [Executable statecharts](https://raw.githubusercontent.com/crvouga/atlas/main/docs/statecharts.md): Write down how a product behaves as statecharts in open formats, then let Atlas lint them, plan paths that cover every transition, run those paths against the real product through any driver (a browser, a phone, a pla…
 
 ## Working with this project
 
-- [Atlas in agent IDEs](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/workspaces.md): This guide develops this repository in Superset, super.engineering, Orca or T3 Code.
-- [Viewer UI conventions](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/ui.md): Read this before changing the Atlas viewer or settings UI.
-- [Dogfooding Atlas from another project](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/dogfooding.md): Atlas is developed by using it in real projects.
-- [Reporting issues](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reporting-issues.md): How people and coding agents in a project that uses Atlas report a bug or a missing feature.
+- [Atlas in agent IDEs](https://raw.githubusercontent.com/crvouga/atlas/main/docs/workspaces.md): This guide develops this repository in Superset, super.engineering, Orca or T3 Code.
+- [Viewer UI conventions](https://raw.githubusercontent.com/crvouga/atlas/main/docs/ui.md): Read this before changing the Atlas viewer or settings UI.
+- [Dogfooding Atlas from another project](https://raw.githubusercontent.com/crvouga/atlas/main/docs/dogfooding.md): Atlas is developed by using it in real projects.
+- [Reporting issues](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reporting-issues.md): How people and coding agents in a project that uses Atlas report a bug or a missing feature.
 
 ## Reference (generated from the code)
 
-- [HTTP API (OpenAPI 3.1)](https://raw.githubusercontent.com/crvouga-organization/atlas/main/packages/server/openapi.json): every endpoint of the server, machine-readable. A running server serves it at /api/openapi.json and a guide for itself at /llms.txt.
-- [HTTP API, in words](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/http-api.md): the same operations as Markdown.
-- [Command line](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/cli.md): the usage of every command.
-- [TypeScript API: core](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/core.md): Executable statecharts: loading, composing, linting, planning and running specs against real apps, and the `atlas` command.
-- [TypeScript API: reports](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/reports.md): Layered evidence for any kind of spec: publishing layers, stores (folder, S3, an Atlas server), combining and gating, the incremental report, init.
-- [TypeScript API: schema](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/schema.md): The contract: Zod schemas, and the JSON Schemas generated from them, for layers, checks, report status, command results, server responses and configuration.
-- [TypeScript API: server](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/server.md): The Atlas server: the API results are uploaded to, the live report, and the viewer on one host.
-- [TypeScript API: playwright](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/playwright.md): The Playwright driver for statechart runs.
-- [TypeScript API: bun](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/bun.md): The Bun WebView driver for statechart runs.
-- [TypeScript API: webdriver](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/webdriver.md): The W3C WebDriver / Appium driver for statechart runs.
-- [TypeScript API: detox](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/detox.md): The Detox driver for statechart runs of React Native apps.
-- [TypeScript API: runners](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/runners.md): Native reporters that upload to the project server.
-- [TypeScript API: vitest](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/vitest.md): Run a statechart plan as Vitest tests.
-- [TypeScript API: critics](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/critics.md): Automated reviewers of the UI catalog: the critic contract, the runner (caching, retries, rate limits, budgets), credential references and redaction, the `atlas.critique` evidence as layers, the catalog client, spooling, calibration and report, warn and gate modes, accept and dismiss marks by reviewers, the `atlas critic` command (list, setup, doctor, run, watch, review, calibrate), and the UIClip and LLM critic adapters (OpenAI-compatible, Anthropic, Gemini).
-- [TypeScript API: playwright-reporter](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/reference/playwright-reporter.md): A Playwright Test reporter that streams every test to Atlas with its duration, device labels, steps, retries, videos, screenshots and traces.
+- [HTTP API (OpenAPI 3.1)](https://raw.githubusercontent.com/crvouga/atlas/main/packages/server/openapi.json): every endpoint of the server, machine-readable. A running server serves it at /api/openapi.json and a guide for itself at /llms.txt.
+- [HTTP API, in words](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/http-api.md): the same operations as Markdown.
+- [Command line](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/cli.md): the usage of every command.
+- [TypeScript API: core](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/core.md): Executable statecharts: loading, composing, linting, planning and running specs against real apps, and the `atlas` command.
+- [TypeScript API: reports](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/reports.md): Layered evidence for any kind of spec: publishing layers, stores (folder, S3, an Atlas server), combining and gating, the incremental report, init.
+- [TypeScript API: schema](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/schema.md): The contract: Zod schemas, and the JSON Schemas generated from them, for layers, checks, report status, command results, server responses and configuration.
+- [TypeScript API: server](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/server.md): The Atlas server: the API results are uploaded to, the live report, and the viewer on one host.
+- [TypeScript API: playwright](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/playwright.md): The Playwright driver for statechart runs.
+- [TypeScript API: bun](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/bun.md): The Bun WebView driver for statechart runs.
+- [TypeScript API: webdriver](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/webdriver.md): The W3C WebDriver / Appium driver for statechart runs.
+- [TypeScript API: detox](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/detox.md): The Detox driver for statechart runs of React Native apps.
+- [TypeScript API: runners](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/runners.md): Native reporters that upload to the project server.
+- [TypeScript API: vitest](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/vitest.md): Run a statechart plan as Vitest tests.
+- [TypeScript API: critics](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/critics.md): Automated reviewers of the UI catalog: the critic contract, the runner (caching, retries, rate limits, budgets), credential references and redaction, the `atlas.critique` evidence as layers, the catalog client, spooling, calibration and report, warn and gate modes, accept and dismiss marks by reviewers, the `atlas critic` command (list, setup, doctor, run, watch, review, calibrate), and the UIClip and LLM critic adapters (OpenAI-compatible, Anthropic, Gemini).
+- [TypeScript API: playwright-reporter](https://raw.githubusercontent.com/crvouga/atlas/main/docs/reference/playwright-reporter.md): A Playwright Test reporter that streams every test to Atlas with its duration, device labels, steps, retries, videos, screenshots and traces.
 - [JSON Schemas](https://unpkg.com/@crvouga/atlas/packages/schema/schemas/): the layer format, checks file, report status, command results, server responses, server configuration.
 
 ## Optional
 
-- [Releasing](https://raw.githubusercontent.com/crvouga-organization/atlas/main/docs/releasing.md): How Atlas gets from main to npm and to its server container image.
+- [Releasing](https://raw.githubusercontent.com/crvouga/atlas/main/docs/releasing.md): How Atlas gets from main to npm and to its server container image.

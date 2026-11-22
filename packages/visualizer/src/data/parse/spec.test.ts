@@ -10,7 +10,7 @@ function parse(files: SpecFile[]) {
 }
 
 const ROOT_SCXML = `<?xml version="1.0" encoding="UTF-8"?>
-<scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:atlas="https://github.com/crvouga-organization/atlas/ns/1" version="1.0" name="Todo list" initial="listing">
+<scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:atlas="https://github.com/crvouga/atlas/ns/1" version="1.0" name="Todo list" initial="listing">
   <atlas:meta>
     <atlas:eventKinds>{"Reminder is due": "time"}</atlas:eventKinds>
   </atlas:meta>
