@@ -8,14 +8,19 @@ on:
     branches: [main]
     paths: [.github/labels.json, .github/workflows/issue-labels.yml]
   issues:
-    types: [opened, edited]
+    types: [opened]
   workflow_dispatch:
 
 permissions:
   issues: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   sync:
+    timeout-minutes: 30
     if: github.event_name != 'issues'
     runs-on: ubuntu-24.04
     steps:
@@ -32,6 +37,7 @@ jobs:
           done
 
   label:
+    timeout-minutes: 30
     if: github.event_name == 'issues'
     runs-on: ubuntu-24.04
     steps:
