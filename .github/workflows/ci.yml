@@ -9,18 +9,19 @@
 # two places only: the consumer smoke, which proves the published package also runs on Node, and the
 # release, because npm Trusted Publishing needs the npm CLI.
 #
-# The schedule and manual dispatch exist to finish an interrupted release (an npm or GitHub outage).
+# The daily schedule and manual dispatch exist to finish an interrupted release (an npm or GitHub outage).
 # Every release step is idempotent, so a run with nothing left to do publishes nothing.
 # See docs/releasing.md.
 name: CI
 
 on:
   pull_request:
+    paths-ignore: ['**.md', 'docs/**']
   push:
     branches: [main]
   workflow_dispatch:
   schedule:
-    - cron: "23 */6 * * *"
+    - cron: "23 5 * * *"
 
 # A pull request's runs replace each other. Runs on main never cancel: each has its own group.
 concurrency:
