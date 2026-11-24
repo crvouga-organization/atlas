@@ -1,3 +1,4 @@
 node_modules
 atlas-site
 .vercel
+public/

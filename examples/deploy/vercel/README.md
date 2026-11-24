@@ -14,11 +14,10 @@ store (which sets `BLOB_READ_WRITE_TOKEN`), and deploys. Make each token a long 
 - `ATLAS_READ_TOKEN` is for people who look. The browser asks for it: any user name, the token as the password. To let
   anyone with the URL look instead, set `ATLAS_ANONYMOUS_READ=1`.
 
-The Blob store must be **private**. If Vercel made a public one, the first upload says so; create a private store under
+The Blob store must be **private**. Open `/readyz` to check the connection. If it reports a public store, create a private store under
 Storage, connect it to the project, and redeploy.
 
-Open the deployment's URL. Until something is published it shows an empty report; if something is missing, the page
-names the variable to set.
+Open the deployment URL for the viewer. An HTTP 200 from `/readyz` confirms that the function can use storage. A configuration failure returns HTTP 503 with the variables to check.
 
 ## 2. Publish from CI, with no secret
 
@@ -48,9 +47,14 @@ upload.
 
 ## 3. Updates
 
-New Atlas releases arrive as Dependabot pull requests. `.github/workflows/update.yml` merges minor and patch releases,
-and Vercel redeploys on the merge. A major release, which may need changes, waits for you. Upgrading by hand is the same
-thing: bump `@crvouga/atlas` in `package.json`.
+Dependabot checks npm daily and opens a pull request for the exact Atlas version. GitHub Actions builds the viewer and
+settings page on Node 22 and smoke-tests the function. When those checks pass for a patch or minor update, the workflow
+merges the tested commit and the Vercel Git integration deploys the production branch. Major updates wait for review.
+
+Keep GitHub Actions and Dependabot version updates enabled in the deployment repository. Allow squash merges. If branch
+rules require other checks, enable **Settings → General → Allow auto-merge** so GitHub can wait for them. Required
+reviews still apply. For a deployment cloned before these checks were added, copy the template’s workflow and configuration
+into your deployment repository once. Dependabot updates the Atlas dependency in that copy.
 
 ## Notes
 

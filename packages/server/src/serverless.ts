@@ -126,13 +126,19 @@ export function createAtlasHandler(options: AtlasHandlerOptions = {}): AtlasHand
     return { server, config };
   }
 
+  function getStarted() {
+    return starting ??= start()
+      .catch(error => ({ failure: `Atlas could not start: ${error instanceof Error ? error.message : String(error)}\n` }))
+      .then(result => {
+        // All callers share one attempt. Only a successful attempt stays cached.
+        if ('failure' in result) starting = null;
+        return result;
+      });
+  }
+
   const handle = (async (request: Request): Promise<Response> => {
-    const started = await (starting ??= start().catch(error => ({ failure: `Atlas could not start: ${error instanceof Error ? error.message : String(error)}\n` })));
-    if ('failure' in started) {
-      // Try again next time: the variable may have been set, or the storage may be back.
-      starting = null;
-      return problemPage(started.failure);
-    }
+    const started = await getStarted();
+    if ('failure' in started) return problemPage(started.failure);
     const url = new URL(request.url);
     // A host rewrite that sends every path to this one function passes the path it was asked for.
     const asked = url.searchParams.get(PATH_PARAM);
@@ -161,7 +167,7 @@ export function createAtlasHandler(options: AtlasHandlerOptions = {}): AtlasHand
   }
 
   Object.defineProperty(handle, 'server', { value: async () => {
-    const started = await (starting ??= start());
+    const started = await getStarted();
     return 'server' in started ? started.server : null;
   } });
   return handle;

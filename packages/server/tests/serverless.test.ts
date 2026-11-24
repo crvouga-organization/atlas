@@ -50,6 +50,22 @@ describe('a deployment that is not configured yet', () => {
     expect(await nothing.text()).toContain('ATLAS_S3_BUCKET');
   });
 
+  test('a failed cold start through server() can recover on the next call', async () => {
+    const { env, blob } = deployment();
+    const config = { ...env, ATLAS_TOKEN: '', ATLAS_PUBLISH_TOKEN: '', ATLAS_READ_TOKEN: '' };
+    const handler = createAtlasHandler({ env: config, cwd: '/nonexistent', fetch: blob.fetch });
+    expect(await handler.server()).toBeNull();
+    config.ATLAS_TOKEN = ADMIN;
+    const [server, ready] = await Promise.all([handler.server(), read(handler, '/readyz', ADMIN)]);
+    expect(ready.status).toBe(200);
+    expect(server).toBe(await handler.server());
+    const probes = blob.requests.filter(r => r.method === 'PUT' && new URL(r.url).searchParams.get('pathname')?.includes('doctor-'));
+    expect(probes).toHaveLength(1);
+    const prefixes = blob.requests.map(r => new URL(r.url).searchParams.get('prefix'));
+    expect(prefixes).toContain(new URL(probes[0]!.url).searchParams.get('pathname'));
+    expect(prefixes).not.toContain('server/');
+  });
+
   test('a public Blob store is named on the page before anything is uploaded', async () => {
     const blob = fakeVercelBlob({ access: 'public' });
     const handler = createAtlasHandler({ env: { BLOB_READ_WRITE_TOKEN: BLOB_TOKEN, VERCEL_BLOB_API_URL: BLOB_API, ATLAS_TOKEN: ADMIN }, cwd: '/nonexistent', fetch: blob.fetch });
