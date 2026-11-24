@@ -1,0 +1,9 @@
+# New Atlas releases arrive as pull requests; .github/workflows/update.yml merges minor and patch ones, and Vercel
+# redeploys on the merge. A major release (which may need changes) waits for a person.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: daily }
+    allow:
+      - dependency-name: "@crvouga/atlas"

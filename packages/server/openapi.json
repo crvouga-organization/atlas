@@ -1375,7 +1375,7 @@
           "Operations"
         ],
         "summary": "Collect garbage now, or preview it",
-        "description": "Applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what it would delete (a disabled policy is previewed as if enabled). Answers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.\n\nRole needed: `admin`.",
+        "description": "Starts a pass that applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what a real pass would delete: layers, blobs (`candidateBlobs`) and bytes (`candidateBytes`). A disabled policy is previewed as if enabled.\n\nThe pass runs in the background and is kept in the store. The answer is the pass: `200` with every run once it is done (a small pass is done before the answer), `202` with `Location: /api/settings/gc/runs/{id}` to poll while it runs. `wait=1` waits for the end, as this operation did before passes existed. There is only one pass at a time: asking again while one runs answers that one. On a host that bounds requests (serverless), each request carries the pass on for a limited time and the next request, poll or scheduled pass continues it.\n\nAnswers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.\n\nRole needed: `admin`.",
         "x-atlas-role": "admin",
         "security": [
           {
@@ -1391,11 +1391,30 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "required": false,
+            "name": "wait",
+            "in": "query",
+            "description": "`1` or `true` to answer only when the pass is done.",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "One run per project.",
+            "description": "The finished pass, with one run per project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcRunResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The pass, still running: poll its `Location`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1426,6 +1445,85 @@
           },
           "409": {
             "description": "No policy has been saved, or it is disabled.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/settings/gc/runs/{id}": {
+      "get": {
+        "operationId": "getGarbageCollectionPass",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "How far a garbage collection pass has come",
+        "description": "A pass by its id: `running`, `done` or `failed`, its progress (projects, the phase of the current one, layers examined and deleted, blobs, bytes) and the runs of the projects finished so far. `200` once it is done, `202` while it runs. A running pass that no process is carrying on (its step ran out of time, or its server restarted) is carried on by this request: in the background on a long-running server, for a bounded time on a serverless host. Finished passes are kept for a while, then forgotten (`404`).\n\nRole needed: `admin`.",
+        "x-atlas-role": "admin",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "required": true,
+            "name": "id",
+            "in": "path",
+            "description": "The pass id from `POST /api/settings/gc/run`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The finished pass.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcRunResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The pass, still running.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcRunResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one. Send `Authorization: Bearer <token>`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is known but its role may not do this.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such pass.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2812,6 +2910,142 @@
           }
         }
       },
+      "post": {
+        "operationId": "directUpload",
+        "tags": [
+          "Store protocol"
+        ],
+        "summary": "Send a large file straight to storage",
+        "description": "For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.\n\n1. `POST /api/store/<key>?upload=start` with `{ \"size\": <bytes>, \"contentType\": \"…\" }`. The answer is `{ \"exists\": true }` for a blob already stored (send nothing), or `{ \"exists\": false, \"method\": \"PUT\", \"url\": …, \"headers\": …, \"expiresAt\": … }`: a request good for this one key, size and type for a few minutes.\n2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).\n3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.\n\nOnly files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.\n\nRole needed: `publish`.",
+        "x-atlas-role": "publish",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "required": true,
+            "name": "key",
+            "in": "path",
+            "description": "An object key under `layers/`, such as `layers/manifests/<id>.json`. It contains slashes, which are not percent-encoded; every other character is.",
+            "example": "layers/index/9007199254740985-0f3a….json",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "upload",
+            "in": "query",
+            "description": "`start` or `complete`.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "start",
+                "complete"
+              ]
+            }
+          },
+          {
+            "required": false,
+            "name": "project",
+            "in": "query",
+            "description": "Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.",
+            "example": "todo-app",
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$",
+              "maxLength": 64
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "For `start`: the size in bytes and the content type.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "size": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "contentType": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`start`: where to send the bytes, or that the blob is already there."
+          },
+          "201": {
+            "description": "`complete`: checked and accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoreWriteResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one. Send `Authorization: Bearer <token>`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is known but its role may not do this.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "This server takes uploads only through `PUT`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Over `limits.maxObjectMiB`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not a file key, nothing arrived, or what arrived is not what its name says (and was deleted).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "operationId": "deleteObject",
         "tags": [
@@ -3148,6 +3382,142 @@
           },
           "422": {
             "description": "Not a key Atlas writes, or the content is not what its name says.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "directUploadForProject",
+        "tags": [
+          "Store protocol"
+        ],
+        "summary": "Send a large file straight to storage",
+        "description": "For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.\n\n1. `POST /api/store/<key>?upload=start` with `{ \"size\": <bytes>, \"contentType\": \"…\" }`. The answer is `{ \"exists\": true }` for a blob already stored (send nothing), or `{ \"exists\": false, \"method\": \"PUT\", \"url\": …, \"headers\": …, \"expiresAt\": … }`: a request good for this one key, size and type for a few minutes.\n2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).\n3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.\n\nOnly files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.\n\nScoped to one project. The same project may be selected on the unprefixed API using ?project= or X-Atlas-Project. Unknown projects return 404 on reads and are created by an authenticated upload.\n\nRole needed: `publish`.",
+        "x-atlas-role": "publish",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "required": true,
+            "name": "project",
+            "in": "path",
+            "description": "Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.",
+            "example": "todo-app",
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$",
+              "maxLength": 64
+            }
+          },
+          {
+            "required": true,
+            "name": "key",
+            "in": "path",
+            "description": "An object key under `layers/`, such as `layers/manifests/<id>.json`. It contains slashes, which are not percent-encoded; every other character is.",
+            "example": "layers/index/9007199254740985-0f3a….json",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "upload",
+            "in": "query",
+            "description": "`start` or `complete`.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "start",
+                "complete"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "For `start`: the size in bytes and the content type.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "size": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "contentType": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`start`: where to send the bytes, or that the blob is already there."
+          },
+          "201": {
+            "description": "`complete`: checked and accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoreWriteResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one. Send `Authorization: Bearer <token>`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is known but its role may not do this.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "This server takes uploads only through `PUT`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Over `limits.maxObjectMiB`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not a file key, nothing arrived, or what arrived is not what its name says (and was deleted).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -12949,7 +13319,7 @@
           "Viewer data"
         ],
         "summary": "A file of an uploaded run",
-        "description": "A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable.\n\nRole needed: `read`.",
+        "description": "A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable. On a server that sends downloads from the store (the serverless handler does), a browser playing or downloading a recording (`sec-fetch-dest` of `video`, `audio` or `document`, a stored type of video, audio or zip) is answered `302` to a URL of the store that works for five minutes and needs no token; the role is checked first. Every other request gets the bytes.\n\nRole needed: `read`.",
         "x-atlas-role": "read",
         "security": [
           {
@@ -13003,6 +13373,9 @@
               }
             }
           },
+          "302": {
+            "description": "A recording, from the store: follow `Location` (a five-minute URL; send the same `Range`)."
+          },
           "401": {
             "description": "No token, or an unknown one. Send `Authorization: Bearer <token>`.",
             "content": {
@@ -13033,7 +13406,7 @@
           "Viewer data"
         ],
         "summary": "A file of an uploaded run",
-        "description": "A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable.\n\nScoped to one project. The same project may be selected on the unprefixed API using ?project= or X-Atlas-Project. Unknown projects return 404 on reads and are created by an authenticated upload.\n\nRole needed: `read`.",
+        "description": "A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable. On a server that sends downloads from the store (the serverless handler does), a browser playing or downloading a recording (`sec-fetch-dest` of `video`, `audio` or `document`, a stored type of video, audio or zip) is answered `302` to a URL of the store that works for five minutes and needs no token; the role is checked first. Every other request gets the bytes.\n\nScoped to one project. The same project may be selected on the unprefixed API using ?project= or X-Atlas-Project. Unknown projects return 404 on reads and are created by an authenticated upload.\n\nRole needed: `read`.",
         "x-atlas-role": "read",
         "security": [
           {
@@ -13086,6 +13459,9 @@
                 }
               }
             }
+          },
+          "302": {
+            "description": "A recording, from the store: follow `Location` (a five-minute URL; send the same `Range`)."
           },
           "401": {
             "description": "No token, or an unknown one. Send `Authorization: Bearer <token>`.",
@@ -13913,6 +14289,24 @@
                 "error": {
                   "description": "Why the pass stopped early, when it did",
                   "type": "string"
+                },
+                "candidateBlobs": {
+                  "description": "Captured-file blobs only the deleted layers used: what a real pass deletes (and did delete, unless a layer could not be read). The same in a dry run. Absent from a server that predates it",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "candidateBytes": {
+                  "description": "Bytes of those blobs and of the deleted layers' manifests: what a real pass frees. The same in a dry run",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "deletedBytes": {
+                  "description": "Bytes a real pass removed; 0 for a dry run",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
                 }
               },
               "required": [
@@ -13931,6 +14325,217 @@
           "stateKey": {
             "type": "string",
             "description": "Where the user state lives in the bucket, relative to the configured prefix"
+          },
+          "currentPass": {
+            "description": "The pass running now, or null. Absent from a server that predates passes",
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9-]{8,64}$"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "running",
+                      "done",
+                      "failed"
+                    ],
+                    "description": "`running` until every project is collected; a pass that stops midway is continued by the next request, scheduled pass or step, never started over"
+                  },
+                  "dryRun": {
+                    "type": "boolean"
+                  },
+                  "startedAt": {
+                    "type": "string",
+                    "description": "ISO 8601"
+                  },
+                  "updatedAt": {
+                    "type": "string",
+                    "description": "When the pass last made progress, ISO 8601"
+                  },
+                  "finishedAt": {
+                    "description": "When it finished, or null while running",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "progress": {
+                    "type": "object",
+                    "properties": {
+                      "projects": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991,
+                        "description": "Projects the pass covers"
+                      },
+                      "projectsDone": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "project": {
+                        "description": "The project being collected now, or null",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "phase": {
+                        "description": "What the pass is doing in that project: `layers` (deleting superseded layers), `scan` (reading the layers that stay), `blobs` (deleting files only deleted layers used)",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "candidates": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991,
+                        "description": "Layers the policy deletes, in the projects reached so far"
+                      },
+                      "layersExamined": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "deletedLayers": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "deletedBlobs": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "candidateBlobs": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "candidateBytes": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "deletedBytes": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "projects",
+                      "projectsDone",
+                      "project",
+                      "phase",
+                      "candidates",
+                      "layersExamined",
+                      "deletedLayers",
+                      "deletedBlobs",
+                      "candidateBlobs",
+                      "candidateBytes",
+                      "deletedBytes"
+                    ],
+                    "additionalProperties": {}
+                  },
+                  "runs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "project": {
+                          "type": "string"
+                        },
+                        "dryRun": {
+                          "type": "boolean"
+                        },
+                        "at": {
+                          "type": "string",
+                          "description": "When the pass finished, ISO 8601"
+                        },
+                        "candidates": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991,
+                          "description": "Layers the policy would delete"
+                        },
+                        "deletedLayers": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "deletedBlobs": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "keptLayers": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "error": {
+                          "description": "Why the pass stopped early, when it did",
+                          "type": "string"
+                        },
+                        "candidateBlobs": {
+                          "description": "Captured-file blobs only the deleted layers used: what a real pass deletes (and did delete, unless a layer could not be read). The same in a dry run. Absent from a server that predates it",
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "candidateBytes": {
+                          "description": "Bytes of those blobs and of the deleted layers' manifests: what a real pass frees. The same in a dry run",
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "deletedBytes": {
+                          "description": "Bytes a real pass removed; 0 for a dry run",
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "project",
+                        "dryRun",
+                        "at",
+                        "candidates",
+                        "deletedLayers",
+                        "deletedBlobs",
+                        "keptLayers"
+                      ],
+                      "additionalProperties": {}
+                    },
+                    "description": "One per project finished so far"
+                  },
+                  "error": {
+                    "description": "Why the pass failed, when it did",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "status",
+                  "dryRun",
+                  "startedAt",
+                  "updatedAt",
+                  "finishedAt",
+                  "progress",
+                  "runs"
+                ],
+                "additionalProperties": {}
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -13945,6 +14550,117 @@
       "GcRunResult": {
         "type": "object",
         "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]{8,64}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "done",
+              "failed"
+            ],
+            "description": "`running` until every project is collected; a pass that stops midway is continued by the next request, scheduled pass or step, never started over"
+          },
+          "dryRun": {
+            "type": "boolean"
+          },
+          "startedAt": {
+            "type": "string",
+            "description": "ISO 8601"
+          },
+          "updatedAt": {
+            "type": "string",
+            "description": "When the pass last made progress, ISO 8601"
+          },
+          "finishedAt": {
+            "description": "When it finished, or null while running",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "progress": {
+            "type": "object",
+            "properties": {
+              "projects": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Projects the pass covers"
+              },
+              "projectsDone": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "project": {
+                "description": "The project being collected now, or null",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "phase": {
+                "description": "What the pass is doing in that project: `layers` (deleting superseded layers), `scan` (reading the layers that stay), `blobs` (deleting files only deleted layers used)",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "candidates": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Layers the policy deletes, in the projects reached so far"
+              },
+              "layersExamined": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "deletedLayers": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "deletedBlobs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "candidateBlobs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "candidateBytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "deletedBytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "projects",
+              "projectsDone",
+              "project",
+              "phase",
+              "candidates",
+              "layersExamined",
+              "deletedLayers",
+              "deletedBlobs",
+              "candidateBlobs",
+              "candidateBytes",
+              "deletedBytes"
+            ],
+            "additionalProperties": {}
+          },
           "runs": {
             "type": "array",
             "items": {
@@ -13984,6 +14700,24 @@
                 "error": {
                   "description": "Why the pass stopped early, when it did",
                   "type": "string"
+                },
+                "candidateBlobs": {
+                  "description": "Captured-file blobs only the deleted layers used: what a real pass deletes (and did delete, unless a layer could not be read). The same in a dry run. Absent from a server that predates it",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "candidateBytes": {
+                  "description": "Bytes of those blobs and of the deleted layers' manifests: what a real pass frees. The same in a dry run",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "deletedBytes": {
+                  "description": "Bytes a real pass removed; 0 for a dry run",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
                 }
               },
               "required": [
@@ -13997,6 +14731,10 @@
               ],
               "additionalProperties": {}
             }
+          },
+          "error": {
+            "description": "Why the pass failed, when it did",
+            "type": "string"
           },
           "policy": {
             "anyOf": [
@@ -14298,6 +15036,42 @@
               "type": "boolean"
             },
             "description": "Features this server has, by name: `events`, `ingest`, `store`, `checks`, `status`, `effective`. A client checks a name before using what it names"
+          },
+          "uploads": {
+            "description": "How this server takes uploads. Absent from a server that predates it: every upload goes through it",
+            "type": "object",
+            "properties": {
+              "directOverBytes": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Files larger than this go straight to storage (`POST /api/store/<key>?upload=start`, then `?upload=complete`); null when every upload goes through the server"
+              }
+            },
+            "required": [
+              "directOverBytes"
+            ],
+            "additionalProperties": {}
+          },
+          "streamMaxSeconds": {
+            "description": "The longest one /api/events stream lasts before the server ends it and the viewer reconnects; null or absent when streams last until the viewer leaves",
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [

@@ -161,9 +161,26 @@ const BASE_OPERATIONS: readonly Operation[] = [
   },
   {
     route: 'POST /api/settings/gc/run', path: '/api/settings/gc/run', operationId: 'runGarbageCollection', tag: 'Operations', role: 'admin',
-    summary: 'Collect garbage now, or preview it', description: 'Applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what it would delete (a disabled policy is previewed as if enabled). Answers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.',
-    parameters: [{ name: 'dryRun', in: 'query', required: false, description: '`1` or `true` to only count what would be deleted.', schema: str }],
-    responses: { '200': json('One run per project.', 'GcRunResult'), '401': UNAUTHORIZED, '403': FORBIDDEN, '409': problem('No policy has been saved, or it is disabled.') }
+    summary: 'Collect garbage now, or preview it',
+    description: [
+      'Starts a pass that applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what a real pass would delete: layers, blobs (`candidateBlobs`) and bytes (`candidateBytes`). A disabled policy is previewed as if enabled.',
+      '',
+      'The pass runs in the background and is kept in the store. The answer is the pass: `200` with every run once it is done (a small pass is done before the answer), `202` with `Location: /api/settings/gc/runs/{id}` to poll while it runs. `wait=1` waits for the end, as this operation did before passes existed. There is only one pass at a time: asking again while one runs answers that one. On a host that bounds requests (serverless), each request carries the pass on for a limited time and the next request, poll or scheduled pass continues it.',
+      '',
+      'Answers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.'
+    ].join('\n'),
+    parameters: [
+      { name: 'dryRun', in: 'query', required: false, description: '`1` or `true` to only count what would be deleted.', schema: str },
+      { name: 'wait', in: 'query', required: false, description: '`1` or `true` to answer only when the pass is done.', schema: str }
+    ],
+    responses: { '200': json('The finished pass, with one run per project.', 'GcRunResult'), '202': json('The pass, still running: poll its `Location`.', 'GcRunResult'), '401': UNAUTHORIZED, '403': FORBIDDEN, '409': problem('No policy has been saved, or it is disabled.') }
+  },
+  {
+    route: 'GET /api/settings/gc/runs/:id', path: '/api/settings/gc/runs/{id}', operationId: 'getGarbageCollectionPass', tag: 'Operations', role: 'admin',
+    summary: 'How far a garbage collection pass has come',
+    description: 'A pass by its id: `running`, `done` or `failed`, its progress (projects, the phase of the current one, layers examined and deleted, blobs, bytes) and the runs of the projects finished so far. `200` once it is done, `202` while it runs. A running pass that no process is carrying on (its step ran out of time, or its server restarted) is carried on by this request: in the background on a long-running server, for a bounded time on a serverless host. Finished passes are kept for a while, then forgotten (`404`).',
+    parameters: [{ name: 'id', in: 'path', required: true, description: 'The pass id from `POST /api/settings/gc/run`.', schema: str }],
+    responses: { '200': json('The finished pass.', 'GcRunResult'), '202': json('The pass, still running.', 'GcRunResult'), '401': UNAUTHORIZED, '403': FORBIDDEN, '404': problem('No such pass.') }
   },
   {
     route: 'GET /healthz', path: '/healthz', operationId: 'getHealth', tag: 'Operations', role: 'none',
@@ -310,6 +327,26 @@ const BASE_OPERATIONS: readonly Operation[] = [
       '200': json('Already there with the same bytes.', 'StoreWriteResult'), '201': json('Stored.', 'StoreWriteResult'),
       '401': UNAUTHORIZED, '403': FORBIDDEN, '409': problem('A dependency has not been uploaded yet, or other bytes are already stored under this key.'),
       '413': problem('Over `limits.maxObjectMiB`.'), '422': problem('Not a key Atlas writes, or the content is not what its name says.')
+    }
+  },
+  {
+    route: 'POST /api/store/*', path: '/api/store/{key}', operationId: 'directUpload', tag: 'Store protocol', role: 'publish',
+    summary: 'Send a large file straight to storage',
+    description: [
+      'For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.',
+      '',
+      '1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.',
+      '2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).',
+      '3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.',
+      '',
+      'Only files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.'
+    ].join('\n'),
+    parameters: [KEY, { name: 'upload', in: 'query', description: '`start` or `complete`.', schema: { type: 'string', enum: ['start', 'complete'] } }],
+    body: { description: 'For `start`: the size in bytes and the content type.', contentType: 'application/json', schema: { type: 'object', properties: { size: { type: 'integer', minimum: 0 }, contentType: str } }, required: false },
+    responses: {
+      '200': { description: '`start`: where to send the bytes, or that the blob is already there.' }, '201': json('`complete`: checked and accepted.', 'StoreWriteResult'),
+      '401': UNAUTHORIZED, '403': FORBIDDEN, '404': problem('This server takes uploads only through `PUT`.'), '413': problem('Over `limits.maxObjectMiB`.'),
+      '422': problem('Not a file key, nothing arrived, or what arrived is not what its name says (and was deleted).')
     }
   },
   {
@@ -798,13 +835,13 @@ const BASE_OPERATIONS: readonly Operation[] = [
   {
     route: 'GET /api/data/runs/:id/*', path: '/api/data/runs/{id}/{path}', operationId: 'getRunFile', tag: 'Viewer data', role: 'read',
     summary: 'A file of an uploaded run',
-    description: 'A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable.',
+    description: 'A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable. On a server that sends downloads from the store (the serverless handler does), a browser playing or downloading a recording (`sec-fetch-dest` of `video`, `audio` or `document`, a stored type of video, audio or zip) is answered `302` to a URL of the store that works for five minutes and needs no token; the role is checked first. Every other request gets the bytes.',
     parameters: [{ name: 'id', in: 'path', required: true, description: 'The run id.', schema: str }, { name: 'path', in: 'path', required: true, description: 'The path inside the run.', schema: str }],
-    responses: { '200': { description: 'The file.', contentType: 'application/octet-stream', schema: { type: 'string', format: 'binary' } }, '401': UNAUTHORIZED, '404': problem('No such run or file.') }
+    responses: { '200': { description: 'The file.', contentType: 'application/octet-stream', schema: { type: 'string', format: 'binary' } }, '302': { description: 'A recording, from the store: follow `Location` (a five-minute URL; send the same `Range`).' }, '401': UNAUTHORIZED, '404': problem('No such run or file.') }
   }
 ];
 
-const NODE_OPERATIONS = new Set(['/api/projects', '/api/settings', '/api/settings/gc', '/api/settings/gc/run', '/api/server', '/api/openapi.json']);
+const NODE_OPERATIONS = new Set(['/api/projects', '/api/settings', '/api/settings/gc', '/api/settings/gc/run', '/api/settings/gc/runs/{id}', '/api/server', '/api/openapi.json']);
 const PROJECT_PARAMETER: Param = { name: 'project', in: 'query', description: 'Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.', schema: { type: 'string', pattern: '^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$', maxLength: 64 }, example: 'todo-app' };
 /** Every node operation and the same stable report protocol inside each project namespace. */
 export const OPERATIONS: readonly Operation[] = BASE_OPERATIONS.flatMap(operation => {

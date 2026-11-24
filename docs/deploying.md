@@ -53,6 +53,7 @@ server. A store is named by a URL. Keys never go in it.
 | Cloudflare R2 | `r2://bucket/atlas/my-project?account=<account id>` (or `R2_ACCOUNT_ID`), with the R2 token's keys in `ATLAS_S3_ACCESS_KEY_ID` / `ATLAS_S3_SECRET_ACCESS_KEY` |
 | Google Cloud Storage | `gs://bucket/atlas/my-project`, with an HMAC key pair in `ATLAS_S3_*` |
 | MinIO, Backblaze B2, Wasabi, SeaweedFS, any S3-compatible | `s3://bucket/atlas/my-project?endpoint=https://host&region=auto` |
+| Vercel Blob (private store) | `vercel-blob://atlas/my-project`, with the store's read-write token in `BLOB_READ_WRITE_TOKEN` ([below](#vercel-blob)) |
 
 Atlas talks to S3 itself, signing requests with Signature Version 4 and sending them with `fetch`: no
 SDK, no extra install, the same on Bun and Node. It is tested against AWS's published signing vectors
@@ -80,6 +81,35 @@ so run `atlas report doctor` against yours before relying on it.
    grows, expire `layers/runs/` (screenshots and clips) first.
 
 Versioning and replication are optional: nothing is ever overwritten with different bytes.
+
+### Vercel Blob
+
+A private [Vercel Blob](https://vercel.com/docs/vercel-blob) store holds layers like a bucket does. Name a folder of it
+and give the store's read-write token in the environment, never in the URL:
+
+```sh
+export BLOB_READ_WRITE_TOKEN=…                        # the Blob store's settings show it
+export ATLAS_STORE=vercel-blob://atlas/my-project      # a folder of the store; vercel-blob:// alone is all of it
+atlas report doctor
+atlas report publish --producer unit --junit out.xml
+```
+
+In code, `vercelBlobStore` from `@crvouga/atlas/reports/vercel-blob-store` is the same store:
+`vercelBlobStore({ token: process.env.BLOB_READ_WRITE_TOKEN, prefix: 'atlas/my-project' })`.
+
+Atlas calls the Blob HTTP API with `fetch`, without the `@vercel/blob` SDK, the same way it talks to S3. Objects are
+written **private**, under their exact keys (no random suffix, overwriting the same bytes on a retry), and read back
+with the token, past the CDN cache, so an overwrite is seen at once. Atlas never hands out a URL to a Blob object:
+`getUri` answers `null`. The store must be private; a public store refuses Atlas's writes.
+
+To move an existing deployment's layers into Blob, merge them: the report read from Blob is then the same.
+
+```sh
+atlas report merge --store s3://my-bucket/atlas/my-project --into vercel-blob://atlas/my-project
+```
+
+The server can keep everything in a Blob store too ([below](#vercel)). `bun test vercel-blob-store.integration` runs
+the store against a real Blob store when `ATLAS_TEST_BLOB_TOKEN` names one.
 
 ## 2. Check it
 
@@ -119,6 +149,10 @@ bun test --reporter=junit --reporter-outfile=out.xml
 bunx atlas report publish --producer unit --junit out.xml --specs ./specs --environment desktop-web
 ```
 
+From GitHub Actions no token is needed at all: give the job `permissions: id-token: write`, leave `ATLAS_TOKEN`
+unset, and a server that trusts the repository accepts the job's own identity ([trusted
+publishing](server.md#trusted-publishing)).
+
 The result is in everyone's view within a few milliseconds, with no bucket credentials anywhere, and no
 artifacts to merge. To show a long suite *while it runs*, stream it: `my-suite --json | atlas report stream
 --producer e2e --environment ios` ([sending results](server.md#sending-results)). The gate asks the server for the
@@ -126,6 +160,27 @@ verdict, so only the verdict travels: `atlas report status --branch main --ignor
 [`examples/deploy/github-actions.yml`](https://github.com/crvouga/atlas/blob/main/examples/deploy/github-actions.yml)
 is the whole workflow, publishers and gate. The rest of this section is publishing straight to a bucket, for
 CI that has bucket access and no route to the server.
+
+### A server behind a sign-in
+
+When the server is hosted behind a platform's sign-in (Vercel Deployment Protection, Cloudflare Access, an
+identity-aware proxy), people pass it in their browser, but CI and laptops need the platform's own header as well
+as Atlas's token. Name it once in `ATLAS_HEADERS` and every command and reporter that talks to an Atlas server sends it:
+
+```sh
+export ATLAS_STORE=https://atlas.example.com
+export ATLAS_TOKEN=…                                         # the Atlas publish token, unchanged
+export ATLAS_HEADERS='x-vercel-protection-bypass=…'          # the platform's bypass secret
+# several, separated by commas: ATLAS_HEADERS='cf-access-client-id=…,cf-access-client-secret=…'
+atlas report doctor --role publisher
+```
+
+`ATLAS_HEADERS` is `name=value` entries separated by commas or new lines. Values are never printed: a malformed entry
+stops the command with exit 2 and names the entry by its position, and `atlas report doctor` names the headers it sent
+and says whether Atlas was reached past the sign-in. When the platform answers with its sign-in page instead of
+Atlas, the command says *the host asked for sign-in before Atlas was reached: set ATLAS_HEADERS*, rather than failing to
+read the page as JSON. `ATLAS_HEADERS` may not set `authorization` (that is `ATLAS_TOKEN`), and the platform's sign-in
+is never a reason to drop Atlas's tokens: anyone who passes it would otherwise be an admin.
 
 ### Straight to the bucket
 
@@ -190,6 +245,52 @@ bunx atlas report publish --producer statecharts --environment desktop-web \
 A run is uploaded only when its privacy scan passed: the same rule the static client applies.
 
 ## 4. The server
+
+### Vercel
+
+The quickest way to run the server: no container, bucket or proxy, and CI publishes with no secret.
+[`examples/deploy/vercel`](https://github.com/crvouga/atlas/tree/main/examples/deploy/vercel) is a template with a
+**Deploy to Vercel** button. It creates the project and a Blob store, and asks for two tokens (`ATLAS_TOKEN` for the admin,
+`ATLAS_READ_TOKEN` for people who look). The template is one function file and a `vercel.json`, with no Atlas logic in
+it:
+
+```ts
+// api/atlas.ts: the viewer and the API, every path rewritten to it
+import { createAtlasHandler } from '@crvouga/atlas/server/serverless';
+const handle = createAtlasHandler();
+export const GET = handle, HEAD = handle, POST = handle, PUT = handle, PATCH = handle, DELETE = handle, OPTIONS = handle;
+```
+
+What changes on a function host, and what does not:
+
+- **Storage** is the project's private Blob store, picked up from `BLOB_READ_WRITE_TOKEN`
+  ([details](server.md#or-a-vercel-blob-store)). Every instance reads the same store and only caches it, so any number of
+  them show the same report.
+- **No timers.** A request looks at the store when the last look is older than `ATLAS_REFRESH_SECONDS`. The daily
+  `/api/cron` run (Vercel Cron, with `CRON_SECRET`; or the admin token) applies a saved garbage collection policy when it is due.
+- **Large files go straight to Blob.** A function accepts about 4.5 MB per request, so `GET /api/server` says
+  `uploads.directOverBytes` (4 MiB; `ATLAS_DIRECT_UPLOAD_OVER_BYTES`). A publisher sends larger files to Blob with a
+  one-time token good for that one key, size and type, and the server checks what arrived as it checks any upload.
+- **Recordings play from Blob.** A browser playing or downloading a run's video, audio or trace zip is sent to the Blob
+  store with a URL that works for five minutes, after its read access was checked, so seeking through a long video costs
+  the function nothing. Pages, SVG, images and anything requested by a script still come through the function, sandboxed.
+  `ATLAS_REDIRECT_DOWNLOADS=0` keeps every byte in the function. Attachments of test results are packed into compressed
+  chunks of several files each, so they are always served by the function.
+- **Live updates** come over a stream the server ends after 4 minutes (`ATLAS_STREAM_MAX_SECONDS`), before the
+  function's time limit; the viewer reconnects by itself.
+- **Publishing from CI** needs no token: the template trusts the GitHub account it was deployed into ([trusted
+  publishing](server.md#trusted-publishing)). Keep Vercel Authentication off for the production domain, which is
+  Vercel's default, or CI needs its bypass secret in `ATLAS_HEADERS` as well.
+- **Updates are automatic.** Dependabot proposes each release and the template's workflow merges minor and patch ones;
+  Vercel redeploys on the merge.
+- **A configuration problem is a page.** Until storage and tokens are right, every request is answered with the
+  banner that names what to set. A deployment with neither tokens nor trusted publishers refuses to serve, so it is
+  never open to the world.
+
+The settings page at `/admin` works here too: `atlas client build` (the template's build step) prebuilds it into the
+site, so the function serves it without bundling anything at runtime.
+
+### A process of its own
 
 ```sh
 atlas serve                    # ATLAS_S3_* says where; listens on :8080
@@ -443,6 +544,8 @@ leave a source out (which needs the history).
 | `the signature was rejected` | Wrong secret, or wrong region/endpoint for these keys, or the clock is off by more than 15 minutes. |
 | `the bucket does not exist` | Typo, another account, or the store needs `?endpoint=…` (R2, MinIO). |
 | `cannot reach <host>` | Network, DNS or endpoint. Requests are retried with backoff first. |
+| `the host asked for sign-in before Atlas was reached` | The server is behind a platform's sign-in. Set `ATLAS_HEADERS` to its bypass header ([above](#a-server-behind-a-sign-in)); if it is set, its value is wrong. |
+| `vercel-blob://…: access denied` | `BLOB_READ_WRITE_TOKEN` is not a read-write token of that Blob store. Copy it again from the store's settings. |
 | The server says `listening … no backend can be read yet` | The bucket is unreachable from the server. It retries; `/readyz` stays 503 until it can read. |
 | A new layer does not show | Uploaded through the server it is there at once: check the token (`401`/`403` say so). Written straight to a bucket, wait one refresh interval (10 s). Check `atlas report status --store <url>` sees it. |
 | Everything is red because of one laptop | By design the newest result wins. Gate on `--ignore-modified` and a branch ([above](#5-choosing-what-takes-part)). |

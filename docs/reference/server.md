@@ -28,6 +28,8 @@ export type AtlasServerOptions = {
   readonly liveStore?: ObjectStore;
   readonly tokens?: readonly ResolvedToken[];
   readonly anonymousRead?: boolean;
+  /** CI identities that may publish without a token (OIDC). Shared by every project of the server. */
+  readonly trust?: TrustedPublishers;
   /** The built viewer. Without it, only the API is served. */
   readonly site?: string;
   readonly outlineBranch?: string;
@@ -36,25 +38,28 @@ export type AtlasServerOptions = {
   readonly include?: (layer: LayerHeader) => boolean;
   readonly refreshMs?: number;
   readonly limits?: { readonly maxObjectMiB?: number; readonly maxJsonMiB?: number; readonly maxStreams?: number };
-  readonly heartbeatMs?: number;
-  /** Producer lease timeout; default 30 seconds. */
-  readonly runTimeoutMs?: number;
-  /** Maximum time without progress; default 15 minutes, 0 disables. */
-  readonly runStallMs?: number;
-  readonly log?: (line: Record<string, unknown>) => void;
-  readonly now?: () => number;
-  readonly version?: string;
-  /** Where this server was built from, for `GET /api/server` (`build`). Unknown fields are null; absent, all are. */
-  readonly build?: BuildInfo;
-  /** Admin configuration persistence, supplied by atlas serve; kept in S3. Changes apply on restart. */
-  readonly settings?: ServerSettings;
-  /** The garbage collection policy, kept in S3 and read from there each time the server collects. Supplied by atlas serve. */
-  readonly gc?: GcSettings;
-  /** How often (ms) the server checks whether a garbage collection pass is due. Default 60 000; for tests. */
-  readonly gcCheckMs?: number;
-  /** Extra runtime configuration written into the page. */
-  readonly page?: Record<string, unknown>;
-};
+  /**
+   * For a host where no process runs between requests (serverless functions): before answering, look at the store for
+   * what others wrote when the last look is older than this many milliseconds, and expire silent live runs, instead of
+   * relying on timers. Unset: timers do it.
+   */
+  readonly refreshOnRequestMs?: number;
+  /** How often (ms) at most the report checkpoint is written after a change. Default 5 minutes; a serverless host, whose instances are short-lived, wants it sooner. */
+  readonly checkpointEveryMs?: number;
+  /** End each live stream after this many milliseconds, so a host's maximum request duration never cuts one; the viewer reconnects. */
+  readonly streamMaxMs?: number;
+  /**
+   * Files larger than this many bytes go straight to storage, for a host that refuses large request bodies. Needs a write
+   * store that can make an upload target (Vercel Blob); ignored otherwise.
+   */
+  readonly directUploadOverBytes?: number;
+  /**
+   * Send a browser playing or downloading a run's recording (video, audio, a trace zip) straight to the store, with a
+   * `302` to a URL that works for five minutes, when the store can sign one (S3, Vercel Blob). Off: every byte goes
+   * through the server. Worth it where the server is a function billed by the second; a store whose address browsers
+   * cannot reach (a bucket on a private network) must leave it off.
+   */
+  …
 ```
 
 What the server is built from: its `backends` (read together) and which one takes uploads (`write`), `tokens`, the built `site`, the report's filters (`include`, `outlineBranch`), `limits`, timings, `log`, and `now` for tests.
@@ -76,6 +81,15 @@ export type AtlasServer = {
    * counts. Never throws: a failure is the `error` of the returned run.
    */
   collectGarbage(policy: GcPolicy, options: { readonly dryRun: boolean; readonly project: string }): Promise<GcRun>;
+  /** This project's upload store and the layers its report has read that no longer decide any result, after one more look at the store: what a garbage collection pass works from. */
+  garbageSource(): Promise<{ readonly store: ObjectStore; readonly eligible: ReadonlySet<string> }>;
+  /**
+   * What timers do on a long-running server, done once, for a scheduler to call where nothing runs between requests: look
+   * at the store, expire silent live runs, and carry on a garbage collection pass, or start one when a saved, enabled
+   * policy is due (the time of the last pass is kept in the store). A pass is advanced within `gcBudgetMs`, so this never
+   * outlives a function's maximum duration. Present on the server `createAtlasServer` returns.
+   */
+  maintain?(): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string; readonly pass?: GcPass | null }>;
   /** Stop refreshing and end every live connection. */
   close(): void;
 };
@@ -100,7 +114,9 @@ Source: `packages/server/src/auth.ts`
 Who is asking, and may they. Tokens have a role (`read` < `critic` < `publish` < `admin`) and are compared in constant time. Reading
 accepts a Bearer token or the browser's sign-in box (any user name, the token as the password); changing anything needs
 the Bearer header, because a browser sends the sign-in box's credentials to any page that asks, which would let another
-site upload with them. A server with no tokens is open, and refuses to listen beyond this machine unless told it may.
+site upload with them. A CI job may also present an OIDC identity token of a trusted publisher (`trusted-publishing.ts`),
+which may publish and nothing more. A server with no tokens and no trusted publishers is open, and refuses to listen
+beyond this machine unless told it may.
 
 #### `Identity`
 
@@ -108,8 +124,8 @@ site upload with them. A server with no tokens is open, and refuses to listen be
 export type Identity = {
   readonly name: string;
   readonly role: ServerRole;
-  /** `bearer` for a token in a header, `basic` for the browser's sign-in box, `none` for a server with no tokens. */
-  readonly via: 'bearer' | 'basic' | 'none';
+  /** `bearer` for a token in a header, `basic` for the browser's sign-in box, `oidc` for a trusted publisher's identity token, `none` for a server with no tokens. */
+  readonly via: 'bearer' | 'basic' | 'oidc' | 'none';
 };
 ```
 
@@ -128,7 +144,7 @@ The answer to "may this request do that": allowed with the identity, or refused 
 #### `createAuth`
 
 ```ts
-export function createAuth(tokens: readonly ResolvedToken[], anonymousRead: boolean)
+export function createAuth(tokens: readonly ResolvedToken[], anonymousRead: boolean, trust?: TrustedPublishers)
 ```
 
 Who is asking, and may they. A server with no tokens is open (and refuses to listen beyond this machine
@@ -259,8 +275,16 @@ A token as the server holds it: the `name` it is shown under in logs, its `role`
 
 ```ts
 export type ResolvedServerConfig = Omit<ServerConfig, 'auth'> & {
-  /** The S3-compatible storage that holds every report and all user state. Required; there is no other. */
-  readonly s3: S3Config;
+  /** The object storage that holds every report and all user state: an S3-compatible bucket or a Vercel Blob store. Required. */
+  readonly storage: StorageConfig;
+  /** The S3 settings, when the storage is S3. */
+  readonly s3?: S3Config;
+  /** CI repositories that may publish with an OIDC identity token instead of a publish token. */
+  readonly trustedPublishers: readonly PublisherRule[];
+  /** Where the trusted publishers came from, for the log. */
+  readonly trustedPublishersSource: string;
+  /** The URLs this server is published at (`ATLAS_PUBLIC_URL`); a CI identity token must be addressed to one. Empty: the request's host. */
+  readonly publicUrls: readonly string[];
   readonly tokens: readonly ResolvedToken[];
   readonly anonymousRead: boolean;
   readonly insecure: boolean;
@@ -346,7 +370,7 @@ variables are an `S3ConfigError` that names all of them, and are checked first.
 #### `assertSafeToListen`
 
 ```ts
-export function assertSafeToListen(config: Pick<ResolvedServerConfig, 'host' | 'tokens' | 'insecure'>): void
+export function assertSafeToListen(config: Pick<ResolvedServerConfig, 'host' | 'tokens' | 'insecure'> & { readonly trustedPublishers?: readonly PublisherRule[] }): void
 ```
 
 A server that anyone on the network can upload to must say who may.
@@ -407,6 +431,101 @@ The viewers connected to `/api/events` and how to reach them all. One hub per se
 - `publish(name: EventName, data: unknown): void` — Tell every viewer. `data` is JSON.
 - `stream(request: Request, greeting: () => unknown): Response` — A stream for one viewer, starting with `hello` (what `greeting` returns). It ends when the viewer goes.
 - `close(): void` — End every stream, for shutting down.
+
+### Garbage collection passes
+
+Source: `packages/server/src/gc-passes.ts`
+
+A garbage collection pass over every project, kept in the store so that any server instance can report it and carry
+it on. A pass is started once (a second start while one runs returns that one), then advanced: on a long-running server
+to the end in the background; on a serverless host in steps bounded by a time budget, each continued by the next
+request, scheduled pass or poll. Each project's part is applied with `stepGarbage`, whose findings are kept in the store
+too (`server/gc/runs/<id>/<project>/`), so a pass that stops or is killed is finished by the next step, never started
+over, and never deletes more than one unbounded pass would. The time a pass judges ages against is fixed when it starts.
+
+Two instances could try to advance one pass at once: a lease in the pass record keeps them apart (the store has no
+conditional writes, so the lease is written, then read back). What each batch found is written before it acts, so
+even an overlap repeats idempotent work rather than deleting anything that is still used.
+
+See docs/server.md#user-state-and-garbage-collection
+
+#### `GC_PREFIX`
+
+```ts
+export const GC_PREFIX = …
+```
+
+Where passes are kept, beside the other server state.
+
+#### `GC_LAST_RUNS`
+
+```ts
+export const GC_LAST_RUNS = …
+```
+
+The runs of the newest finished real pass, for `GET /api/settings/gc` on any instance.
+
+#### `GcSource`
+
+```ts
+export type GcSource = { readonly store: ObjectStore; readonly eligible: ReadonlySet<string> };
+```
+
+What one project offers a pass: its store, and the layers its report has read that no longer decide any result.
+
+#### `GcPassesOptions`
+
+```ts
+export type GcPassesOptions = {
+  /** Where pass records and their findings are kept: the node's own store. */
+  readonly store: ObjectStore;
+  /** The projects a pass covers, in order. */
+  readonly projects: () => Promise<readonly string[]>;
+  /** A project's store and eligible layers, or null when it cannot be collected now (the reason is recorded). */
+  readonly source: (project: string) => Promise<GcSource | { readonly error: string }>;
+  /** Told of the runs of every finished real pass. */
+  readonly record?: (runs: readonly GcRun[]) => void;
+  /** The clock ages are judged by and times are recorded with. Default `Date.now`. */
+  readonly now?: () => number;
+  /** The clock budgets and leases are measured with: one that moves. Default `Date.now`. */
+  readonly tick?: () => number;
+  readonly log?: (line: Record<string, unknown>) => void;
+};
+```
+
+What `GcPasses` needs from the server.
+
+#### `publicPass`
+
+```ts
+export function publicPass(stored: Stored): GcPass
+```
+
+The public view of a stored pass: what the API answers.
+
+#### `GcPasses`
+
+```ts
+export class GcPasses
+```
+
+Garbage collection passes kept in the store. One instance per server; every method may be called from any instance of a
+deployment, since nothing it relies on is held only in memory.
+
+**Example**
+
+```ts
+const passes = new GcPasses({ store, projects: async () => ['default'], source: async () => ({ store, eligible: index.superseded() }) });
+const pass = await passes.start(policy, { dryRun: false });
+await passes.advance(pass.id, { budgetMs: 60_000 });
+```
+
+- `async get(id: string): Promise<GcPass | null>` — A pass by its id, or null.
+- `async current(): Promise<GcPass | null>` — The pass running now, or null.
+- `async lastRuns(): Promise<readonly GcRun[]>` — The runs of the newest finished real pass, as kept in the store.
+- `async start(policy: GcPolicy, options: { readonly dryRun: boolean }): Promise<GcPass>` — Start a pass under `policy`, or return the one already running (whatever kind it is): there is only ever one. The time the policy's ages are judged against is fixed now, so every step of the pass agrees on what is old enough.
+- `advance(id: string, options: { readonly budgetMs?: number } = {}): Promise<GcPass>` — Carry a running pass on, until it is done or `budgetMs` has passed (default: to the end). Returns the pass as it then stands. Another worker holding the pass's lease makes this return at once, with nothing done.
+- `busy(id: string): boolean` — Is this process advancing that pass right now?
 
 ### HTTP host for a fetch handler
 
@@ -540,7 +659,7 @@ The guide for one server, Markdown. Stable in structure: an agent may read it by
 Source: `packages/server/src/main.ts`
 
 Starts the Atlas server from its configuration. Storage comes first and is not optional: the required `ATLAS_S3_*`
-variables are checked (every problem listed together), the bucket is proven reachable and writable, and the user
+(or Vercel Blob) variables are checked (every problem listed together), the storage is proven reachable and writable, and the user
 state (garbage collection policy and saved settings) is read from it, all before anything listens. Any failure prints
 a banner naming every variable and exits 2; there is no fallback to a local folder, memory or a database. Then it
 finds or builds the client, listens at once (so a liveness probe finds the process while a large bucket is still being
@@ -562,7 +681,7 @@ What `serveMain` and `devMain` are given besides arguments: where output goes, a
 export const S3_BACKEND_ID = …
 ```
 
-The id of the one backend: the S3 bucket.
+The id of the one backend: the S3 bucket (or Vercel Blob store; the id stays the same so a deployment can move between them).
 
 #### `openConfiguredBackends`
 
@@ -570,12 +689,12 @@ The id of the one backend: the S3 bucket.
 export function openConfiguredBackends(config: ResolvedServerConfig, fetchImpl?: typeof fetch): (BackendInput & { readonly writable: boolean })[]
 ```
 
-Open the S3 bucket named by a configuration, with exactly the credentials it gives (no ambient AWS lookup). Nothing is contacted yet.
+Open the storage named by a configuration, with exactly the credentials it gives (no ambient AWS lookup). Nothing is contacted yet.
 
 #### `serverOptionsOf`
 
 ```ts
-export function serverOptionsOf(config: ResolvedServerConfig, backends: ReturnType<typeof openConfiguredBackends>, log?: (line: Record<string, unknown>) => void): AtlasServerOptions
+export function serverOptionsOf(config: ResolvedServerConfig, backends: ReturnType<typeof openConfiguredBackends>, log?: (line: Record<string, unknown>) => void, fetchImpl?: typeof fetch): AtlasServerOptions
 ```
 
 What `createAtlasServer` is given for a configuration: `atlas serve` and `atlas dev` run the same server.
@@ -801,13 +920,82 @@ Registers the review collection routes on `app`:
 `GET /api/reports/review-collections/detail`, `POST /api/reports/review-collections/reviews` and
 `GET /api/reports/review-collections/export`.
 
+### Serverless handler (`@crvouga/atlas/server/serverless`)
+
+Source: `packages/server/src/serverless.ts`. Import: `@crvouga/atlas/server/serverless`
+
+The Atlas server as one `(Request) => Promise<Response>` for a host that runs functions instead of a process, such as
+Vercel. Configuration comes from the environment exactly as for `atlas serve` (storage, tokens, trusted publishers),
+and the differences of a function host are handled here:
+
+- Nothing runs between requests, so nothing relies on a timer: a request looks at the store when the last look is older
+  than the refresh interval, and `GET /api/cron` does the scheduled work (garbage collection when a policy is due).
+- Any number of instances may run: everything is in the store, and an instance only caches it.
+- Request bodies are small, so large files go straight to storage (Vercel Blob) and the server checks them after.
+- Responses are billed by the second, so a browser playing a run's recording is sent to the store with a five-minute URL.
+- Requests have a maximum duration, so live streams end on their own before it and viewers reconnect.
+- A server with neither tokens nor trusted publishers would let anyone administer it, so it refuses to serve.
+
+A configuration problem is answered as a 503 page that names every variable to set (never a value), so whoever opens a
+fresh deployment sees what is missing.
+
+See docs/deploying.md#vercel
+
+#### `AtlasHandlerOptions`
+
+```ts
+export type AtlasHandlerOptions = {
+  /** The configuration: the same variables as `atlas serve`. Default `process.env`. */
+  readonly env?: Env;
+  /** Where a configuration file and the built viewer (`atlas-site`) are looked for. Default `process.cwd()`. */
+  readonly cwd?: string;
+  /** The built viewer, served at `/`. Default `ATLAS_SITE`, then `./atlas-site` when it exists, else the API only. */
+  readonly site?: string;
+  /** The `fetch` storage requests are sent with; for tests. */
+  readonly fetch?: typeof fetch;
+  /** Where log lines go. Default one JSON line per entry on standard output when the configuration's `log` is on. */
+  readonly log?: (line: Record<string, unknown>) => void;
+};
+```
+
+What a function host's handler is built from. Everything is optional: by default the environment and the working directory of the function.
+
+#### `AtlasHandler`
+
+```ts
+export type AtlasHandler = ((request: Request) => Promise<Response>) & { readonly server: () => Promise<AtlasServer | null> };
+```
+
+A function host's request handler, and, for tests and embedding, the server once it has started.
+
+#### `createAtlasHandler`
+
+```ts
+export function createAtlasHandler(options: AtlasHandlerOptions = {}): AtlasHandler
+```
+
+The Atlas server as a function: storage, tokens and trusted publishers from the environment, the viewer from `atlas-site`.
+The server starts on the first request of each instance and is kept for the rest; a start that failed is tried again on
+the next request.
+
+**Example**
+
+```ts
+// api/atlas.ts in a Vercel project
+import { createAtlasHandler } from '@crvouga/atlas/server/serverless';
+const handle = createAtlasHandler();
+export const GET = handle, POST = handle, PUT = handle, DELETE = handle, HEAD = handle, PATCH = handle, OPTIONS = handle;
+```
+
 ### settings-page.ts
 
 Source: `packages/server/src/settings-page.ts`
 
 @module Settings page
-The administrator's React and Mantine entry point, bundled lazily for API-only servers too.
-Credentials remain in page memory; the settings API owns authorization and validation.
+The administrator's React and Mantine entry point. A built site carries it prebuilt (`admin/settings.js` and
+`admin/settings.css`, written by `atlas client build`), which is what a server without Bun's bundler (a Node function)
+serves; otherwise it is bundled lazily with Bun, for API-only servers too. Credentials remain in page memory; the
+settings API owns authorization and validation.
 
 #### `SETTINGS_PAGE`
 
@@ -817,19 +1005,29 @@ export const SETTINGS_PAGE = …
 
 Document shell for the shared React settings UI. No configuration or credentials are embedded.
 
+#### `PREBUILT_SETTINGS`
+
+```ts
+export const PREBUILT_SETTINGS = …
+```
+
+Where a built site keeps the prebuilt settings page, relative to the site.
+
 #### `renderSettingsPage`
 
 ```ts
-export function renderSettingsPage(): Promise<string>
+export function renderSettingsPage(site?: string): Promise<string>
 ```
 
-Render the settings UI with the same provider and theme as the viewer. Bundle once on first request,
-without a prebuilt viewer, CDN, configuration data, or import-time work. A failed build can be retried.
+Render the settings UI with the same provider and theme as the viewer. With a built `site` that carries the prebuilt
+page (`atlas client build` writes it), that page, read once; otherwise bundled with Bun once on first request; on a
+runtime with neither, a page that says how to change settings without it. No configuration data, no import-time work,
+and a failed build can be retried.
 
 **Example**
 
 ```ts
-const html = await renderSettingsPage();
+const html = await renderSettingsPage(options.site);
 ```
 
 ### settings.ts
@@ -930,16 +1128,18 @@ export async function findSite(named: string | undefined, cwd: string, log: (tex
 
 The client to serve: the one named, a build beside the project, or one built into the user's cache.
 
-### Required S3 storage configuration
+### Required object storage configuration
 
 Source: `packages/server/src/storage.ts`
 
-The Atlas server keeps ALL reports and ALL user state (the garbage collection policy and saved settings) in
-S3-compatible object storage, and nowhere else: no local folder, no memory, no database. So the storage settings
-are required, come only from environment variables (they hold secrets), and have no defaults for where or as whom
-to connect. `resolveS3Config` checks every variable in one pass and reports all the problems together;
-`startupFailure` renders them as a banner that cannot be missed. `S3_VARIABLES` is the single description of the
-variables: the banner, `.env.example` and the documentation table are all made from it.
+The Atlas server keeps ALL reports and ALL user state (the garbage collection policy and saved settings) in object
+storage, and nowhere else: no local folder, no memory, no database. That storage is an S3-compatible bucket
+(`ATLAS_S3_*`) or a private Vercel Blob store (`BLOB_READ_WRITE_TOKEN`); `resolveStorage` picks one from
+`ATLAS_STORAGE`, or, when that is unset, uses Blob only if a Blob token is the only storage configured. The settings are
+required, come only from environment variables (they hold secrets), and have no defaults for where or as whom to
+connect. Every variable is checked in one pass and all problems are reported together; `startupFailure` renders them
+as a banner that cannot be missed. `S3_VARIABLES` and `BLOB_VARIABLES` are the single description of the variables:
+the banner, `.env.example` and the documentation are made from them.
 
 See docs/server.md#required-s3-storage
 
@@ -1000,7 +1200,80 @@ The state of one variable after checking, for the banner.
 export class S3ConfigError extends Error
 ```
 
-The storage configuration could not be used. `findings` has every variable, not only the first problem.
+The storage configuration could not be used. `findings` has every variable, not only the first problem. `kind` is the storage it is about.
+
+#### `StorageKind`
+
+```ts
+export type StorageKind = 's3' | 'vercel-blob';
+```
+
+The kinds of storage the server can keep everything in.
+
+#### `BLOB_VARIABLES`
+
+```ts
+export const BLOB_VARIABLES: readonly S3Variable[]
+```
+
+Every variable that configures Vercel Blob storage.
+
+#### `BlobConfig`
+
+```ts
+export type BlobConfig = { readonly token: string; readonly prefix: string; /** `VERCEL_BLOB_API_URL`, as Vercel's own SDK reads it; absent for the real service. */ readonly apiUrl?: string };
+```
+
+Vercel Blob storage once checked.
+
+#### `StorageConfig`
+
+```ts
+export type StorageConfig = { readonly kind: 's3'; readonly s3: S3Config } | { readonly kind: 'vercel-blob'; readonly blob: BlobConfig };
+```
+
+Where the server keeps everything: an S3-compatible bucket or a Vercel Blob store.
+
+#### `inspectStorageEnv`
+
+```ts
+export function inspectStorageEnv(env: Env, kind: StorageKind): readonly S3Finding[]
+```
+
+Looks at every variable of one kind of storage and returns what each is. Nothing here throws.
+
+#### `storageKindOf`
+
+```ts
+export function storageKindOf(env: Env): StorageKind
+```
+
+Which storage the environment asks for: `ATLAS_STORAGE` (`s3` or `vercel-blob`) when it is set; otherwise Vercel Blob
+when `BLOB_READ_WRITE_TOKEN` is set and no `ATLAS_S3_*` variable is, and S3 in every other case (so an unconfigured
+server still names the S3 variables, as it always has). Throws a `ConfigError`-like `Error` for an unknown `ATLAS_STORAGE`.
+
+#### `resolveStorage`
+
+```ts
+export function resolveStorage(env: Env): StorageConfig
+```
+
+The storage settings from the environment, of the kind {@link storageKindOf} picks. Throws {@link S3ConfigError}, whose
+message lists every variable of that kind and marks each missing or invalid one.
+
+**Example**
+
+```ts
+const storage = resolveStorage(process.env); // { kind: 'vercel-blob', blob: { token, prefix } } on Vercel
+```
+
+#### `describeStorage`
+
+```ts
+export const describeStorage = …
+```
+
+Where the storage is, without a secret: what the log may say.
 
 #### `inspectS3Env`
 
@@ -1036,7 +1309,7 @@ Where the storage is, without a secret: what the log may say.
 #### `startupFailure`
 
 ```ts
-export function startupFailure(findings: readonly S3Finding[], reason: string, detail?: string): string
+export function startupFailure(findings: readonly S3Finding[], reason: string, detail?: string, kind: StorageKind = 's3'): string
 ```
 
 The banner printed when the server cannot start because of storage: why storage is required, then EVERY variable by
@@ -1049,7 +1322,9 @@ Source: `packages/server/src/store-api.ts`
 The `ObjectStore` interface over HTTP at `/api/store`: list keys under `layers/`, read and probe an object, upload one
 (checked by `validateUpload`, immutable once stored) and remove a scratch object. This is what `httpStore` talks to. An
 upload is told to the report only after it is stored, and a layer's manifest, parsed while it was checked, is handed on so
-it is not read again. Everything read is served as untrusted bytes (never sniffed, never run).
+it is not read again. Everything read is served as untrusted bytes (never sniffed, never run). Where the storage can take
+a file from a publisher directly (`direct`), `POST /api/store/<key>?upload=start` says where to send a large file and
+`?upload=complete` checks what arrived, as an upload is checked, before it counts.
 
 See docs/server.md#the-store-protocol
 
@@ -1062,10 +1337,31 @@ export type StoreApiOptions = {
   readonly maxObjectBytes: number;
   /** Told after something was uploaded: its key, and what kind of thing it is. */
   readonly onStored: (key: string, kind: string, layer?: ReportLayer) => void | Promise<void>;
+  /**
+   * Where a publisher may send a large file's bytes itself, straight to the storage (a host whose functions refuse large
+   * request bodies). Without it, `POST /api/store/<key>?upload=…` answers 404 and publishers upload through the server.
+   */
+  readonly direct?: DirectUploads;
 };
 ```
 
 What the store routes need: the `store` they read and write, the `auth` that decides who may, the largest object accepted, and `onStored`, told after each upload with its key, its kind and (for a layer catalog entry) the layer already parsed.
+
+#### `UploadTarget`
+
+```ts
+export type UploadTarget = { readonly method: 'PUT'; readonly url: string; readonly headers: Readonly<Record<string, string>>; readonly expiresAt: string };
+```
+
+A request a publisher makes to the storage itself: what `POST /api/store/<key>?upload=start` answers.
+
+#### `DirectUploads`
+
+```ts
+export type DirectUploads = { target(key: string, upload: { readonly size: number; readonly contentType: string }): Promise<UploadTarget> };
+```
+
+How the storage takes a file straight from a publisher: a short-lived request good for one key, one size and one type.
 
 #### `readLimited`
 
@@ -1082,6 +1378,143 @@ export function storeApi(options: StoreApiOptions)
 ```
 
 The Hono app of the store protocol, to be mounted at `/api/store`. Reads need role `read`; writes need `publish` through a Bearer token.
+
+### Trusted publishing (CI identity by OIDC)
+
+Source: `packages/server/src/trusted-publishing.ts`
+
+CI uploads results without any secret: a GitHub Actions job asks GitHub for a short-lived OIDC ID token addressed to this
+server, and the server checks GitHub's signature, the audience (this server's origin), the expiry, and that the repository
+is on an allowlist. The allowlist is `ATLAS_TRUSTED_PUBLISHERS` (`github:acme`, `github:acme/web`,
+`github:acme/web@refs/heads/main`); when it is not set and the server was deployed from a GitHub repository (Vercel and
+Railway say which), every repository of that repository's owner is trusted. An owner trusted by name is pinned to its
+numeric GitHub id the first time it publishes (kept in the store), so a renamed or re-registered name cannot inherit
+the trust. A trusted publisher has the publish role, like a publish token: it may upload and read (so a CI gate needs no
+secret either); critiquing settings and administering still need tokens.
+
+Verification is asynchronous (the signing keys are fetched and cached), the role checks are not: `prepare` verifies a
+request's token once and remembers the identity until the token expires, and `identityOf` answers from that memory.
+
+See docs/server.md#trusted-publishing
+
+#### `GITHUB_ISSUER`
+
+```ts
+export const GITHUB_ISSUER = …
+```
+
+GitHub Actions' token issuer.
+
+#### `PINS_KEY`
+
+```ts
+export const PINS_KEY = …
+```
+
+Where owner pins are kept, beside the other server state.
+
+#### `PublisherRule`
+
+```ts
+export type PublisherRule = { readonly provider: 'github'; readonly owner: string; readonly repo: string | null; readonly ref: string | null };
+```
+
+One allowlist entry: an owner, or one repository, optionally only from one git ref.
+
+#### `PublisherIdentity`
+
+```ts
+export type PublisherIdentity = { readonly name: string; readonly repository: string; readonly ref: string; readonly expiresAtMs: number };
+```
+
+Who a verified token says it is: `name` is `github:owner/repo`, never the token.
+
+#### `parsePublisherRules`
+
+```ts
+export function parsePublisherRules(text: string): readonly PublisherRule[]
+```
+
+Parses `ATLAS_TRUSTED_PUBLISHERS`: entries separated by commas, spaces or new lines, each `github:<owner>`,
+`github:<owner>/<repo>` or `github:<owner>/<repo>@<ref>` (such as `@refs/heads/main`). `none` alone trusts nobody.
+Throws an error naming the entry that is not one of these.
+
+**Example**
+
+```ts
+parsePublisherRules('github:acme, github:other/web@refs/heads/main');
+```
+
+#### `publisherRulesOf`
+
+```ts
+export function publisherRulesOf(env: Env): { readonly rules: readonly PublisherRule[]; readonly source: string }
+```
+
+The allowlist this deployment uses, and where it came from: `ATLAS_TRUSTED_PUBLISHERS` when set; otherwise the owner of
+the GitHub repository the platform deployed it from (`VERCEL_GIT_REPO_OWNER` with `VERCEL_GIT_PROVIDER=github`, or
+`RAILWAY_GIT_REPO_OWNER`); otherwise nobody. Throws as {@link parsePublisherRules} does.
+
+#### `describeRule`
+
+```ts
+export const describeRule = …
+```
+
+A human line for one rule: `github:acme/web@refs/heads/main`.
+
+#### `looksLikeJwt`
+
+```ts
+export const looksLikeJwt = …
+```
+
+Does a bearer value look like a JWT (three base64url parts)?
+
+#### `TrustedPublishersOptions`
+
+```ts
+export type TrustedPublishersOptions = {
+  readonly rules: readonly PublisherRule[];
+  /** Where owner pins are kept (`server/trusted-publishers.json`). Without one, owners are matched by name only. */
+  readonly store?: ObjectStore;
+  readonly fetch?: typeof fetch;
+  readonly now?: () => number;
+  readonly jwksUrl?: string;
+  /**
+   * The URLs this server is published at (`ATLAS_PUBLIC_URL`). When given, a token must be addressed to one of them;
+   * otherwise to the host the request arrived on. Set it when the server can be reached without a platform's router in
+   * front, where a caller chooses the Host header.
+   */
+  readonly audiences?: readonly string[];
+  readonly log?: (line: Record<string, unknown>) => void;
+};
+```
+
+What `TrustedPublishers` is given: the allowlist, the store that keeps owner pins, and, for tests, `fetch`, the clock and the issuer's key URL.
+
+#### `TrustedPublishers`
+
+```ts
+export class TrustedPublishers
+```
+
+Verifies CI identity tokens against an allowlist. One instance is shared by every part of a server, so a token verified
+once is known everywhere until it expires.
+
+**Example**
+
+```ts
+const trust = new TrustedPublishers({ rules: publisherRulesOf(process.env).rules, store });
+await trust.prepare(request);            // before the synchronous role checks
+const who = trust.identityOf(bearer);    // PublisherIdentity | null
+```
+
+- `readonly rules: readonly PublisherRule[];` — The allowlist this instance checks against.
+- `get enabled(): boolean { return this.rules.length > 0; }` — Is anyone trusted at all?
+- `identityOf(token: string): PublisherIdentity | null` — The identity of a token verified earlier and not yet expired, or `null`.
+- `async prepare(request: Request, isStaticToken: (value: string) => boolean = () => false): Promise<void>` — Verify the bearer token of a request if it is a JWT this server has not seen, and remember who it is. Never throws: a token that fails is simply not an identity, and the role check refuses it. `staticTokens` are skipped (they are Atlas's own tokens, not identity tokens).
+- `async verify(token: string, hosts: readonly string[]): Promise<PublisherIdentity>` — Who a GitHub Actions ID token says it is, if its signature, issuer, audience, times and repository all check out; otherwise throws an error saying which did not. `hosts` are the hosts this server answers on; the token's audience must be a URL on one of them (the scheme is not compared: a TLS proxy forwards plain HTTP).
 
 ### UI catalog collection queue
 

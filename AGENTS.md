@@ -103,7 +103,11 @@ contract](docs/report-contract.md#versioning-and-stability) allows.
   vocabularies, nothing that decides a result. To add a kind of evidence, add it to
   `layer-v1-extended.json` and keep `layer-extensibility.test.ts` passing. Never close a vocabulary, never make
   an evidence field required, never let evidence change a status, a slot or a winner.
-- Attachment bytes are untrusted. Serve them only through `attachment-response.ts`.
+- Attachment bytes are untrusted. Serve them only through `attachment-response.ts`. Its `storeRedirect` is the one
+  exception to serving them from this origin: after the role check, a browser playing or downloading a run's recording
+  (`sec-fetch-dest` video, audio or document) whose *stored* type is video, audio or zip may get a `302` to a store URL that
+  works for at most five minutes. Never widen that list to HTML, SVG, XML, scripts, PDF, images or unknown bytes, never
+  decide on the file name instead of the stored type, and never sign a URL before the role check.
 
 ## The server is a living application, and a protocol
 
@@ -159,15 +163,29 @@ colocation: say it once, next to what it describes, and generate everything else
 - Guides in `docs/` are written by hand and listed in `scripts/docs/generate.ts` (`GUIDES`) so they reach `llms.txt`; a test
   checks every relative link and anchor.
 
-## The server stores everything in S3, and says so
+## The server stores everything in object storage, and says so
 
-`atlas serve` and `atlas dev` keep all reports and all user state (the garbage collection policy and saved settings, one
-JSON document at `server/state.json`) in S3-compatible storage and nowhere else. Do not add a local-disk, memory, database
-or browser-storage path for either, and do not give the required `ATLAS_S3_*` variables a default: a missing or invalid
-one must stop the server with the banner of `packages/server/src/storage.ts` (every variable listed, exit 2). A new
-variable goes in `S3_VARIABLES` and `.env.example`. Garbage collection is off until a policy is saved from the UI and
-deletes only superseded layers (`packages/reports/src/garbage.ts`); keep both properties. Server tests run against the
-in-memory S3 in `packages/server/tests/fake-s3.ts`.
+`atlas serve`, `atlas dev` and the serverless handler keep all reports and all user state (the garbage collection policy
+and saved settings, one JSON document at `server/state.json`) in object storage and nowhere else: an S3-compatible bucket
+(`ATLAS_S3_*`) or a private Vercel Blob store (`BLOB_READ_WRITE_TOKEN`). Do not add a local-disk, memory, database
+or browser-storage path for either, and do not give the required variables a default: a missing or invalid
+one must stop the server with the banner of `packages/server/src/storage.ts` (every variable listed, exit 2; the
+serverless handler answers it as a 503 page). A new variable goes in `S3_VARIABLES` or `BLOB_VARIABLES` and `.env.example`.
+Garbage collection is off until a policy is saved from the UI and deletes only superseded layers
+(`packages/reports/src/garbage.ts`); keep both properties. Server tests run against the in-memory S3 in
+`packages/server/tests/fake-s3.ts` and the fake Blob service in `packages/reports/tests/fake-vercel-blob.ts`.
+
+The serverless handler (`packages/server/src/serverless.ts`) must stay correct when every request lands on a fresh
+instance and many run at once: nothing it relies on may live only in memory or depend on a timer firing between requests.
+It refuses to serve with neither tokens nor trusted publishers. Direct uploads hand out only short-lived targets for one
+file key, and what arrives is checked by `validateUpload` before it counts.
+
+## Trusted publishing is publish, never more
+
+A CI identity token (`packages/server/src/trusted-publishing.ts`) is accepted only with GitHub's signature, an audience
+that is this server, an unexpired time, an allowlisted repository and the pinned owner id. It grants the `publish` role
+and nothing higher. Never accept an audience from a header a caller controls, never widen the default allowlist beyond
+the deploying owner, and never send the Atlas token or `ATLAS_HEADERS` to a direct-upload target.
 
 ## The S3 store is tested against a real server
 

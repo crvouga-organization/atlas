@@ -1,10 +1,12 @@
 /**
  * @module Stores named by URL
  *
- * Turns a store name (`./folder`, `s3://bucket/prefix`, `r2://…`, `gs://…`, `https://atlas.example.com`) into an opened
- * `ObjectStore`, and a list of names (`ATLAS_STORE`, `--store`) into backends with unique ids. Secrets never travel in a
- * URL: S3 credentials come from the environment, an Atlas server's token from `ATLAS_TOKEN` (or `ATLAS_TOKEN_<ID>` for a
- * named store when several servers are used), and a token is never sent to a server over plain `http://` beyond this machine.
+ * Turns a store name (`./folder`, `s3://bucket/prefix`, `r2://…`, `gs://…`, `vercel-blob://folder`, `https://atlas.example.com`)
+ * into an opened `ObjectStore`, and a list of names (`ATLAS_STORE`, `--store`) into backends with unique ids. Secrets never
+ * travel in a URL: S3 credentials and the Blob token (`BLOB_READ_WRITE_TOKEN`) come from the environment, an Atlas server's
+ * token from `ATLAS_TOKEN` (or `ATLAS_TOKEN_<ID>` for a named store when several servers are used), and a token is never sent
+ * to a server over plain `http://` beyond this machine. Extra headers for a server behind a sign-in (`ATLAS_HEADERS`) come
+ * from the environment too.
  *
  * @see docs/deploying.md#1-where-results-are-kept
  */
@@ -18,13 +20,18 @@ import { directoryStore } from './directory-store';
 import type { ObjectStore } from './object-store';
 import { httpStore, type HttpStore } from './http-store';
 import { s3Store, type S3Store } from './s3-store';
+import { atlasHeaders } from './request-headers';
+import { ciIdentity } from './ci-identity';
+import { vercelBlobStore, type VercelBlobStore } from './vercel-blob-store';
 
 type Env = Readonly<Record<string, string | undefined>>;
 
-/** Where a store is, parsed: a `directory`, an S3-compatible `s3` bucket and prefix (with region, endpoint and addressing), or an Atlas `server` URL. */
+/** Where a store is, parsed: a `directory`, an S3-compatible `s3` bucket and prefix (with region, endpoint and addressing), a folder of a Vercel Blob store, or an Atlas `server` URL. */
 export type StoreLocation =
   | { readonly kind: 'directory'; readonly directory: string }
   | { readonly kind: 's3'; readonly bucket: string; readonly prefix: string; readonly region?: string; readonly endpoint?: string; readonly pathStyle?: boolean }
+  /** A folder of the Vercel Blob store that `BLOB_READ_WRITE_TOKEN` belongs to. */
+  | { readonly kind: 'vercel-blob'; readonly prefix: string }
   /** An Atlas server: uploads go to it, and it shows everyone the combined report. */
   | { readonly kind: 'server'; readonly url: string };
 
@@ -36,6 +43,8 @@ export type OpenedStore = {
   readonly location: StoreLocation;
   /** The S3 handle, for credential source and ping. */
   readonly s3?: S3Store;
+  /** The Vercel Blob handle, for ping. */
+  readonly blob?: VercelBlobStore;
   /** The server handle, for ping. */
   readonly server?: HttpStore;
 };
@@ -49,6 +58,8 @@ export type OpenedStore = {
  *   `credentialChain`).
  * - `r2://bucket/prefix?account=<id>` (Cloudflare R2) and `gs://bucket/prefix` (Google Cloud Storage with
  *   HMAC keys): the same store with the endpoint filled in. Atlas does not test against these two.
+ * - `vercel-blob://folder`: a folder of the Vercel Blob store whose read-write token is `BLOB_READ_WRITE_TOKEN`
+ *   (`vercel-blob://` alone is the whole store). The token is never in the URL.
  */
 export function parseStoreLocation(spec: string, base: string, env: Env = {}): StoreLocation {
   // Shorthands for two services that speak S3's protocol, so there is no endpoint to look up.
@@ -62,6 +73,14 @@ export function parseStoreLocation(spec: string, base: string, env: Env = {}): S
     url.searchParams.set('endpoint', kind === 'r2' ? `https://${account}.r2.cloudflarestorage.com` : 'https://storage.googleapis.com');
     if (!url.searchParams.has('region')) url.searchParams.set('region', 'auto');
     return parseStoreLocation(url.toString(), base, env);
+  }
+  if (/^vercel-blob:\/\//i.test(spec)) {
+    const rest = spec.replace(/^vercel-blob:\/\//i, '');
+    if (/[@?#]/.test(rest)) throw new Error(`"${spec}" is more than a folder. A token does not belong in a store URL (set BLOB_READ_WRITE_TOKEN); write vercel-blob://<folder>`);
+    // The host is the first folder: vercel-blob://my-project/ci is the folder my-project/ci.
+    const prefix = decodeURIComponent(rest).replace(/^\/+|\/+$/g, '');
+    if (prefix.split('/').some(part => part === '..' || part === '.') || prefix.includes('//')) throw new Error(`"${spec}" is not a folder: write vercel-blob://<folder>`);
+    return { kind: 'vercel-blob', prefix };
   }
   if (/^s3:\/\//i.test(spec)) {
     const url = new URL(spec);
@@ -79,7 +98,7 @@ export function parseStoreLocation(spec: string, base: string, env: Env = {}): S
     if (url.username || url.password) throw new Error('A token does not belong in a server URL: set ATLAS_TOKEN.');
     return { kind: 'server', url: `${url.origin}${url.pathname.replace(/\/+$/, '')}` };
   }
-  if (/^[a-z][a-z0-9+.-]+:\/\//i.test(spec) && !/^file:\/\//i.test(spec)) throw new Error(`Unsupported store "${spec}". Use a directory, an Atlas server (https://…), s3://bucket/prefix, r2://bucket/prefix?account=<id> or gs://bucket/prefix`);
+  if (/^[a-z][a-z0-9+.-]+:\/\//i.test(spec) && !/^file:\/\//i.test(spec)) throw new Error(`Unsupported store "${spec}". Use a directory, an Atlas server (https://…), s3://bucket/prefix, r2://bucket/prefix?account=<id>, gs://bucket/prefix or vercel-blob://folder`);
   return { kind: 'directory', directory: /^file:\/\//i.test(spec) ? fileURLToPath(spec) : path.resolve(base, spec) };
 }
 
@@ -99,8 +118,15 @@ export function openStore(spec: string, options: { readonly base: string; readon
     const env = options.env ?? {};
     const token = serverToken(env, options.role ?? { id: '', soleServer: true });
     if (token) refuseClearToken(location.url, env);
-    const server = httpStore({ url: location.url, ...(env.ATLAS_PROJECT ? { project: env.ATLAS_PROJECT } : {}), ...(token ? { token } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
+    const headers = atlasHeaders(env);
+    // Without a token, CI that can prove which repository it is publishes as that repository (trusted publishing).
+    const identity = token ? null : ciIdentity(location.url, env, options.fetch ? { fetch: options.fetch } : {});
+    const server = httpStore({ url: location.url, headers, ...(env.ATLAS_PROJECT ? { project: env.ATLAS_PROJECT } : {}), ...(token ? { token } : {}), ...(identity ? { identity } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
     return { store: server, label: server.label, location, server };
+  }
+  if (location.kind === 'vercel-blob') {
+    const blob = vercelBlobStore({ prefix: location.prefix, env: options.env ?? {}, ...(options.fetch ? { fetch: options.fetch } : {}) });
+    return { store: blob, label: blob.label, location, blob };
   }
   const s3 = s3Store({
     bucket: location.bucket,
@@ -140,7 +166,10 @@ function refuseClearToken(url: string, env: Env): void {
 
 /** A short id for a store, unique among the given ones: `my-bucket-ci`, `reports`. */
 export function storeId(location: StoreLocation, taken: ReadonlySet<string>): string {
-  const raw = location.kind === 's3' ? [location.bucket, location.prefix].filter(Boolean).join('-') : location.kind === 'server' ? new URL(location.url).host : path.basename(location.directory);
+  const raw = location.kind === 's3' ? [location.bucket, location.prefix].filter(Boolean).join('-')
+    : location.kind === 'server' ? new URL(location.url).host
+    : location.kind === 'vercel-blob' ? `blob-${location.prefix}`
+    : path.basename(location.directory);
   const base = raw.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'store';
   let id = base;
   for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;

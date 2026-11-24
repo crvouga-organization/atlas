@@ -101,6 +101,22 @@ try {
   await reader.cancel();
   server.close();
   await http.close(100);
+
+  // A start over a remote store (ATLAS_BENCH_LATENCY_MS per request, default 50), from the checkpoint the first start wrote.
+  const latency = Number(process.env.ATLAS_BENCH_LATENCY_MS ?? 50);
+  const wait = () => new Promise(resolve => setTimeout(resolve, latency));
+  let requests = 0;
+  const slow: typeof store = { ...store,
+    get: async key => { requests += 1; await wait(); return store.get(key); },
+    head: async key => { requests += 1; await wait(); return store.head(key); },
+    put: async (key, bytes, type) => { requests += 1; await wait(); return store.put(key, bytes, type); },
+    listKeys: async prefix => { requests += Math.max(1, Math.ceil((await store.listKeys(prefix)).length / 1000)); await wait(); return store.listKeys(prefix); }
+  };
+  started = performance.now();
+  const remote = createAtlasServer({ backends: [{ id: 'data', store: slow }], write: 'data', refreshMs: 3_600_000 });
+  await remote.ready;
+  line(`start from the checkpoint, ${latency} ms per request`, `${ms(started)}  (${requests} requests)`);
+  remote.close();
 } finally {
   if (!kept) await rm(dir, { recursive: true, force: true });
 }

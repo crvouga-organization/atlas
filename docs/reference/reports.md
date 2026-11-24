@@ -564,6 +564,11 @@ test run, so they are treated as untrusted: never sniffed, never allowed to run 
 another site. Videos can be sought (HTTP range requests). Every route that serves attachment bytes must go
 through here (or add {@link UNTRUSTED_HEADERS}); it never reads from a store itself.
 
+The one exception to "through the server" is decided here too, by {@link storeRedirect}: a large recording a browser
+plays or downloads may be sent straight from the store (a `302` to a URL that works for a few minutes), when the store
+can sign one and the stored media type is one that cannot run (video, audio, a zip). It is served from the store's own
+origin, never this one, so it can reach nothing of Atlas's.
+
 See docs/report-contract.md (evidence rule 8)
 
 #### `UNTRUSTED_HEADERS`
@@ -591,6 +596,42 @@ A single `bytes=a-b`, `bytes=a-` or `bytes=-n` range answers 206, an unsatisfiab
 not understood and get the whole body (200).
 
 - `etag`: A strong validator the caller derives from content identity (it is sent as given, so include the quotes).
+
+#### `redirectableType`
+
+```ts
+export function redirectableType(contentType: string): boolean
+```
+
+Is this stored media type one a browser may be sent to the store for? Parameters (`; codecs=…`) are ignored.
+
+#### `REDIRECT_SECONDS`
+
+```ts
+export const REDIRECT_SECONDS = …
+```
+
+How long a download URL from {@link storeRedirect} works, in seconds. A player that seeks later asks Atlas again.
+
+#### `storeRedirect`
+
+```ts
+export async function storeRedirect(request: Request, store: ObjectStore, key: string): Promise<Response | null>
+```
+
+A `302` to a short-lived URL of `key` in `store`, or `null` to serve the bytes through the server as usual. Call it only
+after the caller's role was checked: it is answered only when the store can sign URLs (`SignedDownloads`), the object
+exists, its stored media type is {@link redirectableType}, and the request is a browser playing or downloading it
+(`sec-fetch-dest` of `video`, `audio` or `document`). A script's `fetch` (which would need the store to allow this
+origin) and a client that is not a browser always get the bytes from the server. The answer is never cached
+(`private, no-store`) and sends no referrer. A store that fails to sign is answered `null`, not an error.
+
+**Example**
+
+```ts
+const redirect = await storeRedirect(request, store, `layers/runs/${id}/clip.webm`);
+if (redirect) return redirect;
+```
 
 ### AWS credential lookup
 
@@ -1180,6 +1221,52 @@ chosen key. `recent` keeps input order.
 Group order: for `status`, failed, running, skipped, passed; otherwise alphabetical by name with `Other` (the
 label for an empty file, package or runtime) last. With `none` there is a single group named `All`. When
 nothing matches, no group is returned.
+
+### CI identity tokens (trusted publishing, client side)
+
+Source: `packages/reports/src/ci-identity.ts`. Import: `@crvouga/atlas/reports/ci-identity`
+
+In GitHub Actions with `permissions: id-token: write`, a job can ask GitHub for a short-lived OIDC token that says which
+repository, branch and workflow it is. An Atlas server that trusts the repository accepts that token instead of a publish
+token, so CI publishes with no secret at all. `ciIdentity` returns a source of such tokens, addressed to one server (the
+token's audience is the server's origin, so it is useless anywhere else) and renewed shortly before each expires; it
+returns `null` outside a CI that offers one. A token is never printed.
+
+See docs/server.md#trusted-publishing
+
+#### `IdentitySource`
+
+```ts
+export type IdentitySource = { (): Promise<string>; /** Where the tokens come from, for people: `GitHub Actions OIDC`. */ readonly label: string };
+```
+
+A source of identity tokens for one server: the current one, fetched or renewed when needed.
+
+#### `ciIdentity`
+
+```ts
+export function ciIdentity(serverUrl: string, env: Env, options: { readonly fetch?: typeof fetch; readonly now?: () => number } = {}): IdentitySource | null
+```
+
+Identity tokens addressed to `serverUrl` from the CI this runs in, or `null` when it offers none (not in GitHub Actions,
+or the workflow did not grant `id-token: write`). The source throws when GitHub refuses to mint one.
+
+**Example**
+
+```ts
+const identity = ciIdentity('https://atlas.example.com', process.env);
+const bearer = identity ? await identity() : process.env.ATLAS_TOKEN;
+```
+
+#### `bearerFor`
+
+```ts
+export async function bearerFor(serverUrl: string, token: string | undefined, env: Env = typeof process === 'undefined' ? {} : process.env): Promise<string | undefined>
+```
+
+What to send as the bearer to an Atlas server: the given token when there is one, else a CI identity token for
+`serverUrl` when the CI offers one, else nothing. For clients that make their own requests (the live reporter, the
+runner upload); `httpStore` takes the source itself.
 
 ### Stores named on a command line
 
@@ -1833,8 +1920,8 @@ Source: `packages/reports/src/doctor.ts`. Import: `@crvouga/atlas/reports/doctor
 
 `inspectStore` checks that a store works end to end (credentials, listing, what it holds, writing and reading back a
 scratch object) and says what to fix when it does not; `iamPolicy` prints the least-privilege AWS policy for publishers
-and readers. Used by `atlas report doctor` and `atlas report policy`, for folders, S3-compatible buckets and Atlas
-servers alike.
+and readers. Used by `atlas report doctor` and `atlas report policy`, for folders, S3-compatible buckets, Vercel Blob
+stores and Atlas servers alike. For a server it first says whether Atlas was reached at all, past a platform's sign-in.
 
 See docs/deploying.md
 
@@ -3606,6 +3693,12 @@ missing manifest; its manifest next; then the captured-file blobs that no remain
 layer cannot be read, no blob is deleted: what cannot be read is unknown, never unused. Specs, runs and commit
 inventories are not touched.
 
+A pass can run in bounded steps (`stepGarbage`): it works in batches of layers, writes what each batch found to a
+scratch place before deleting anything, and stops starting batches when its deadline passes. The next step continues
+from there, so a host that ends long requests (a serverless function) still finishes the pass, a pass killed midway is
+finished by the next one, and the steps together delete exactly what one unbounded pass would. A dry run walks the
+same steps without deleting, so it reports what a real pass would delete: layers, blobs and bytes.
+
 See docs/server.md#user-state-and-garbage-collection
 
 #### `GcCandidate`
@@ -3624,6 +3717,8 @@ export type GcPlan = {
   readonly candidates: readonly GcCandidate[];
   /** Layers in the catalog that stay. */
   readonly kept: number;
+  /** The ids of the layers that stay, when `planGarbage` made the plan: what a pass reads to keep the blobs they use. */
+  readonly remaining?: readonly string[];
 };
 ```
 
@@ -3632,10 +3727,12 @@ What a policy would delete from a store right now.
 #### `GcOutcome`
 
 ```ts
-export type GcOutcome = { readonly deletedLayers: number; readonly deletedBlobs: number };
+export type GcOutcome = { readonly deletedLayers: number; readonly deletedBlobs: number; readonly candidateBlobs?: number; readonly candidateBytes?: number; readonly deletedBytes?: number };
 ```
 
-The outcome of applying a plan.
+The outcome of applying a plan. `candidateBlobs` and `candidateBytes` are what the pass found to delete (the blobs only
+the deleted layers used, and the bytes of those blobs and of the layers' manifests), the same for a dry run as for a
+real one; `deletedBytes` is what a real pass removed (0 for a dry run).
 
 #### `planGarbage`
 
@@ -3653,15 +3750,109 @@ Lists the catalog only. With `policy.enabled === false` the plan is empty.
 const plan = await planGarbage(store, { policy, nowMs: Date.now(), eligible: index.superseded() });
 ```
 
+#### `GcScratch`
+
+```ts
+export type GcScratch = {
+  /** A document written earlier, or null. */
+  read<T>(name: string): Promise<T | null>;
+  /** Writes (or replaces) a document. */
+  write(name: string, value: unknown): Promise<void>;
+  /** Removes everything this pass wrote. */
+  clear(): Promise<void>;
+};
+```
+
+Where a bounded pass keeps what it has found between steps: small JSON documents by name. `storeScratch` keeps them in
+a store under a prefix (so another process can continue the pass); `memoryScratch` keeps them for one call.
+
+#### `storeScratch`
+
+```ts
+export function storeScratch(store: ObjectStore, prefix: string): GcScratch
+```
+
+Scratch documents in `store` under `prefix`, so a pass can be continued by another process.
+
+#### `memoryScratch`
+
+```ts
+export function memoryScratch(): GcScratch
+```
+
+Scratch documents in memory, for a pass that runs to the end in one call.
+
+#### `GcStep`
+
+```ts
+export type GcStep = GcOutcome & {
+  readonly done: boolean;
+  readonly phase: 'layers' | 'scan' | 'blobs' | 'done';
+  readonly candidates: number;
+  /** Candidate layers examined (and, in a real pass, deleted) so far. */
+  readonly layersExamined: number;
+  /** Remaining layers read so far, to find the blobs they still use. */
+  readonly layersScanned: number;
+  /** True when a layer could not be read, so no blob is deleted: what cannot be read is unknown, never unused. */
+  readonly unreadable: boolean;
+};
+```
+
+How far a bounded pass over one store has come. When `done`, nothing is left and the counts are final.
+
+#### `GcStepOptions`
+
+```ts
+export type GcStepOptions = {
+  /** Count and report, delete nothing. */
+  readonly dryRun?: boolean;
+  /** Start no new batch once the clock passes this (epoch ms). Default: never stop early. */
+  readonly deadline?: number;
+  /** The clock the deadline is read with. Default `Date.now`. */
+  readonly now?: () => number;
+  /** Layers or blobs per batch. Default 50. */
+  readonly batch?: number;
+  /** Told after every batch, with the progress so far. */
+  readonly onBatch?: (progress: GcStep) => void | Promise<void>;
+};
+```
+
+Options of one step of a bounded pass.
+
+#### `stepGarbage`
+
+```ts
+export async function stepGarbage(store: ObjectStore, scratch: GcScratch, plan: GcPlan, options: GcStepOptions = {}): Promise<GcStep>
+```
+
+One bounded step of applying a plan, continuing from what `scratch` holds. Batches of candidate layers are read (the
+blobs they use and their sizes written to scratch first) and then deleted, catalog entry first; then the remaining
+layers are read to see which blobs they still use; then the blobs only the deleted layers used are counted and deleted.
+What each batch found is written before anything is deleted and every delete is idempotent, so a step that is stopped
+or killed is finished by the next, and the steps together delete exactly what one unbounded pass would. Layers
+published after the plan are read before any blob is deleted, so a blob a new layer uses is kept. No new batch starts
+after `deadline`.
+
+Give every step of one pass the same `plan` (with `remaining`) and the same scratch; the server keeps both in the store.
+
+**Example**
+
+```ts
+const scratch = storeScratch(store, 'server/gc/runs/abc/default/');
+let step;
+do step = await stepGarbage(store, scratch, plan, { deadline: Date.now() + 60_000 }); while (!step.done);
+```
+
 #### `collectGarbage`
 
 ```ts
-export async function collectGarbage(store: ObjectStore, plan: GcPlan): Promise<GcOutcome>
+export async function collectGarbage(store: ObjectStore, plan: GcPlan, options: { readonly dryRun?: boolean } = {}): Promise<GcOutcome>
 ```
 
-Deletes the layers of a plan, then the blobs only they used. Store errors throw after whatever was already deleted;
-running the same plan again finishes the job, because every delete is idempotent and the catalog entry (what
-makes a layer visible) always goes before the content.
+Applies a plan in one call: the unbounded form of {@link stepGarbage}, with what it finds kept in memory. Deletes the
+layers of the plan, then the blobs only they used; with `dryRun` it deletes nothing and only counts. Store errors throw
+after whatever was already deleted; running the same plan again finishes the job, because every delete is idempotent
+and the catalog entry (what makes a layer visible) always goes before the content.
 
 ### URL hash routes of the reports viewer
 
@@ -3837,7 +4028,8 @@ Source: `packages/reports/src/http-store.ts`. Import: `@crvouga/atlas/reports/ht
 `httpStore` speaks the server's store protocol (`/api/store`) as an `ObjectStore`, so everything that publishes to a store
 (`publishChecks`, spec sets, run uploads, `copyStore`, `createReporter`) publishes to a server unchanged. It retries what a
 retry can fix (network errors, 5xx, 429, 408) with jittered backoff, never what it cannot (401, 403, 409, 413, 422), and
-every refusal says what to do about it.
+every refusal says what to do about it. Behind a platform's sign-in it sends the extra headers of `ATLAS_HEADERS`, and a
+sign-in page where Atlas should have answered is an error that says so, never a parse failure.
 
 See docs/server.md#the-store-protocol
 
@@ -3851,6 +4043,17 @@ export type HttpStoreOptions = {
   readonly url: string;
   /** A publish or admin token to write with, a read token to read with. Never put it in the URL. */
   readonly token?: string;
+  /**
+   * Without a `token`: where to get a CI identity token for this server (trusted publishing). `openStore` gives one in
+   * GitHub Actions with `id-token: write`. A server that trusts the repository lets it publish with no secret.
+   */
+  readonly identity?: IdentitySource;
+  /**
+   * Extra headers for every request, for a server behind a platform's sign-in (`x-vercel-protection-bypass`, Cloudflare
+   * Access service tokens). Default: `ATLAS_HEADERS` from the process environment (throws when it is malformed). Their
+   * values are never printed.
+   */
+  readonly headers?: Readonly<Record<string, string>>;
   readonly fetch?: typeof fetch;
   /** Retries after the first attempt, for network errors and server errors. Default 4. */
   readonly retries?: number;
@@ -3879,6 +4082,8 @@ export type HttpStore = ObjectStore & PagedListing & {
   /** `https://atlas.example.com`, with no secrets. */
   readonly label: string;
   readonly url: string;
+  /** The names (never the values) of the extra headers sent with every request. */
+  readonly headerNames: readonly string[];
   /** Is the server there, and does it know this token? */
   ping(): Promise<{ readonly ok: boolean; readonly ms: number; readonly role?: string; readonly error?: string }>;
   /** The gate, worked out by the server from the layers it holds: the `atlas report status --format json` document. Needs a token that may read. */
@@ -5695,6 +5900,26 @@ export function isPaged(store: ObjectStore): store is ObjectStore & PagedListing
 
 Whether a store also implements `PagedListing`.
 
+#### `SignedDownloads`
+
+```ts
+export interface SignedDownloads {
+  signedUrl(key: string, options: { readonly expiresInSeconds: number }): Promise<{ readonly url: string; readonly contentType: string; readonly size: number | null } | null>;
+}
+```
+
+Optional, beyond the seven methods: a short-lived URL anyone holding it may read one object from, and the object's stored
+media type and size, so a server can send a large download straight from the store instead of through itself. `null`
+when the key is missing. A store without it is always read through `get`.
+
+#### `canSign`
+
+```ts
+export function canSign(store: ObjectStore): store is ObjectStore & SignedDownloads
+```
+
+Whether a store can hand out short-lived download URLs (`SignedDownloads`).
+
 ### Consumer package-manager commands
 
 Source: `packages/reports/src/package-managers.ts`. Import: `@crvouga/atlas/reports/package-managers`
@@ -7193,6 +7418,113 @@ already holds as `?have=`; after a failure it waits 3 seconds first) until the c
 `dispose` is called. Sources and the stylesheet are also read from the query cache so a revisit paints at once.
 Call this inside a Solid root: it creates signals and a store.
 
+### Report checkpoint
+
+Source: `packages/reports/src/report-checkpoint.ts`. Import: `@crvouga/atlas/reports/report-checkpoint`
+
+A server that starts would read every layer's catalog entry and manifest (two requests per layer, every start). The
+checkpoint keeps, in the store, what folding each layer needs (its evidence and the specs it recorded), packed into
+gzip segments of a few hundred layers, and a head that names the segments with their SHA-256. A starting `ReportIndex`
+reads the head and the segments (tens of requests instead of tens of thousands) and uses them as a cache of
+catalog entry to evidence: the catalog listing still decides which layers take part, so a layer deleted by garbage
+collection is not folded and a layer the checkpoint does not know is read as before. The report is therefore exactly
+the one recomputed from every layer, with or without a checkpoint, current or stale.
+
+Segments are immutable and named by their content, so instances that write at once never conflict; the head is
+overwritten, and any head names a correct set. A head that cannot be read, is of another format, or names a segment
+whose bytes do not match is ignored with a notice, and the index reads everything as before.
+
+See docs/server.md#performance
+
+#### `CHECKPOINT_PREFIX`
+
+```ts
+export const CHECKPOINT_PREFIX = …
+```
+
+Where the checkpoint lives in a store.
+
+#### `SEGMENT_SIZE`
+
+```ts
+export const SEGMENT_SIZE = …
+```
+
+Layers per closed segment.
+
+#### `CheckpointEntry`
+
+```ts
+export type CheckpointEntry = { readonly mark: string; readonly evidence: LayerEvidence; readonly specs: readonly SpecEntry[] };
+```
+
+What folding one layer needs: which catalog entry of which backend (`mark`, `<backend>|<key>`), its evidence and its recorded specs.
+
+#### `LoadedCheckpoint`
+
+```ts
+export type LoadedCheckpoint = { readonly entries: Map<string, CheckpointEntry>; readonly closed: readonly { readonly ref: SegmentRef; readonly marks: readonly string[] }[]; readonly open: readonly CheckpointEntry[] };
+```
+
+A checkpoint as read: every entry by mark, the closed segments (with the marks in each) that may be named again unchanged, and the open segment's entries.
+
+#### `readCheckpoint`
+
+```ts
+export async function readCheckpoint(store: ObjectStore): Promise<LoadedCheckpoint | { readonly error: string } | null>
+```
+
+Reads the checkpoint in `store`. Returns `null` when there is none, and `{ error }` when there is one that cannot be
+trusted (unreadable, another format, a segment missing or not matching its digest): the caller reads everything instead.
+
+#### `writeSegment`
+
+```ts
+export async function writeSegment(store: ObjectStore, entries: readonly CheckpointEntry[]): Promise<SegmentRef>
+```
+
+Writes one segment (named by its content, so writing it again is harmless) and returns its reference.
+
+#### `writeHead`
+
+```ts
+export async function writeHead(store: ObjectStore, segments: readonly SegmentRef[], now: number): Promise<void>
+```
+
+Points the checkpoint at these segments. Written last, so a reader never sees a head whose segments are not there.
+
+#### `pruneSegments`
+
+```ts
+export async function pruneSegments(store: ObjectStore, keep: ReadonlySet<string>): Promise<number>
+```
+
+Removes segments the current head does not name and `keep` does not either (the segments this writer just named, in
+case another head was written meanwhile). A segment another writer names in a head written after this reads it is
+at worst re-read as missing: that reader then reads everything, and writes a checkpoint again.
+
+#### `dropCheckpoint`
+
+```ts
+export async function dropCheckpoint(store: ObjectStore): Promise<void>
+```
+
+Removes the checkpoint: the next start reads every layer and writes a new one.
+
+#### `CheckpointWriter`
+
+```ts
+export class CheckpointWriter
+```
+
+What a `ReportIndex` keeps to write its checkpoint: the closed segments already in the store, and the entries folded
+since (at most a segment's worth, so memory stays small). `flush` closes full segments, rewrites the open one and
+the head; it is called after a refresh, at most every `everyMs`, and does nothing when nothing changed.
+
+- `resume(loaded: LoadedCheckpoint, kept: ReadonlySet<string>): void` — Start from what was read: closed segments whose every layer is still in the report are named again unchanged; the rest of their layers (and the open segment's) are carried as open entries. `kept` says which marks took part.
+- `add(entry: CheckpointEntry): void` — A layer was folded. A full segment is written at once, so a first read of a large store never holds every layer.
+- `flush(force = false): Promise<void>` — Write what changed, if anything did and the last write is old enough (or `force`). Never throws: a failed write is logged and tried again later.
+
 ### The `atlas report` command
 
 Source: `packages/reports/src/report-cli.ts`. Import: `@crvouga/atlas/reports/report-cli`
@@ -7302,7 +7634,8 @@ result of every slot it fills, then dropped unless it still holds a winner, so m
 the age of the project. The winner rule is a total order, so folding is exact in any order and equals combining every layer
 from scratch (a test proves it over random partial runs). It also keeps what each layer sends (rows, JSON, a digest) until
 that layer changes, so taking in a result costs one layer, answers viewers a version hash, a cached JSON text and a delta,
-and tells listeners what arrived.
+and tells listeners what arrived. With a `checkpoint` store it keeps what folding each layer needs there, so a start reads
+tens of objects instead of two per layer, and the report it serves is still exactly the one every layer makes.
 
 See docs/report-contract.md
 See docs/server.md#performance
@@ -7355,6 +7688,7 @@ It reads only immutable layers (`layers/index/…`), which is what makes "read o
 - `accept(backendId: string, indexKey: string, known?: ReportLayer): Promise<void>` — Take in a layer an uploader has just written, from its catalog entry, without listing anything. Entries are read one after another; one already known is ignored. The regular refresh still reconciles the rest.
 - `onChange(listener: (change: IndexChange) => void): () => void` — Be told when the report changes. Returns how to stop.
 - `async start(intervalMs: number): Promise<void>` — Keep refreshing in the background. The first call returns once the first pass has finished.
+- `async restore(): Promise<number>` — The first pass, from the checkpoint when there is one: the whole catalog is listed (so what was deleted is left out and what is new is read), and each layer the checkpoint holds is folded from it instead of read. Then the checkpoint is written again if it changed. Without a checkpoint store it is a plain refresh. Returns how many layers came from it.
 - `stop(): void` — Stops the background refresh started by `start`. Safe to call twice.
 - `get ready(): boolean { return this.#refreshedAt > 0; }` — True once a first pass over the backends has finished, so `snapshot` is a report and not an empty guess.
 - `snapshot(): EffectiveEvidence` — The current report, ready to send. Built once per change, and only the layers that changed are rebuilt.
@@ -8258,6 +8592,77 @@ Lists the source records of a commit from the shared and the local store, one pe
 replaces the shared one of the same name only; others from both are kept. A store that fails is skipped, and the
 error is thrown only when no source was found at all and a store failed.
 
+### Extra headers for an Atlas server behind a sign-in
+
+Source: `packages/reports/src/request-headers.ts`. Import: `@crvouga/atlas/reports/request-headers`
+
+A server hosted behind a platform's sign-in (Vercel Deployment Protection, Cloudflare Access, an identity-aware proxy)
+only lets a machine through with that platform's own header, beside Atlas's token. `ATLAS_HEADERS` names those
+headers once (`name=value`, separated by commas or new lines) and every client that talks to an Atlas server sends
+them. Their values are secrets: nothing here ever prints one, not even when an entry is malformed.
+
+See docs/deploying.md#a-server-behind-a-sign-in
+
+#### `parseHeaders`
+
+```ts
+export function parseHeaders(text: string): Readonly<Record<string, string>>
+```
+
+Parses an `ATLAS_HEADERS` value: `name=value` entries separated by commas or new lines; spaces around each are
+ignored, and a value may itself contain `=`. Names are lower-cased.
+
+Throws an error that names the entry by its position (and its name, when it has one), never its value, when an
+entry has no `=`, an empty name or value, a name that is not a valid header name, a name Atlas sets itself
+(`authorization`, `content-type`, `content-length`, `host`, `x-atlas-project`), or a name given twice.
+
+**Example**
+
+```ts
+parseHeaders('x-vercel-protection-bypass=abc123'); // { 'x-vercel-protection-bypass': 'abc123' }
+```
+
+#### `atlasHeaders`
+
+```ts
+export function atlasHeaders(env: Env): Readonly<Record<string, string>>
+```
+
+The extra headers to send to an Atlas server, from `ATLAS_HEADERS` in `env`; empty when it is not set. Throws as
+{@link parseHeaders} does for a malformed value, so a command fails before it sends anything.
+
+**Example**
+
+```ts
+const headers = atlasHeaders(process.env);
+```
+
+#### `processHeaders`
+
+```ts
+export function processHeaders(): Readonly<Record<string, string>>
+```
+
+`ATLAS_HEADERS` from the process environment, where there is one (not in a browser).
+
+#### `isSignInPage`
+
+```ts
+export function isSignInPage(response: Response, requested: string, expectJson: boolean): boolean
+```
+
+Did a request meant for an Atlas server get a platform's sign-in page instead? True when the request was redirected to
+another host and answered with HTML (a sign-in host), or the answer is HTML where Atlas answers JSON (`expectJson`), or
+a 401 or 403 that is HTML (Atlas refuses in JSON). Reads only the status, headers and final URL, never the body.
+
+#### `signInMessage`
+
+```ts
+export function signInMessage(base: string, headers: Readonly<Record<string, string>>): string
+```
+
+What to say when {@link isSignInPage} is true: the host's sign-in stopped the request before Atlas saw it.
+
 ### Resilient report cache
 
 Source: `packages/reports/src/resilient-cache.ts`. Import: `@crvouga/atlas/reports/resilient-cache`
@@ -8671,13 +9076,21 @@ Lists the newest `limit` (default 100) runs in the store, newest first by `start
 newest first, so one page of it is enough; entries never change, so `cache` (catalog key to summary) lets a
 long-lived reader open each only once. A catalog entry that is empty or not JSON is skipped.
 
+#### `runFileKey`
+
+```ts
+export function runFileKey(id: string, relative: string): string | null
+```
+
+The store key of one file of a run, or `null` for an `id` that is not a plain run name or a `relative` path with an empty, `.`, `..` or backslash segment, so a path can never leave the run.
+
 #### `readRunFile`
 
 ```ts
 export async function readRunFile(store: ObjectStore, id: string, relative: string): Promise<StoredObject | null>
 ```
 
-Reads one file of a run, or `null` when it is missing. Also `null`, without reading, for an `id` that is not a plain run name or a `relative` path with an empty, `.`, `..` or backslash segment, so a path can never leave the run.
+Reads one file of a run, or `null` when it is missing. Also `null`, without reading, for a path {@link runFileKey} refuses.
 
 ### Run comparison
 
@@ -9055,7 +9468,7 @@ permission); `status` and `code` are what the service answered, `null` when it w
 #### `S3Store`
 
 ```ts
-export type S3Store = ObjectStore & PagedListing & {
+export type S3Store = ObjectStore & PagedListing & SignedDownloads & {
   /** A description with no secrets: `s3://bucket/prefix (us-east-1)`. */
   readonly label: string;
   /** Where the credentials came from, once a request has been made. */
@@ -9085,7 +9498,7 @@ is followed, and expired credentials are refreshed once.
 Behaviour to know: a missing key reads as `null`/`false` only when S3 answers 404. For an account without
 `s3:ListBucket`, S3 answers 403 for a missing key, which throws `S3Error` with a hint: the publishing credentials
 need `s3:GetObject`, `s3:PutObject` and `s3:ListBucket` (`atlas report policy` prints a least-privilege policy).
-`getUri` returns a presigned URL valid for one hour. `deleteMany` sends one request per key, 16 at a time.
+`getUri` returns a presigned URL valid for one hour; `signedUrl` one valid as long as asked, with the stored type and size. `deleteMany` sends one request per key, 16 at a time.
 `listKeys` pages through the whole listing and sorts it; use `listPage` to read part of a large catalog. Nothing is
 checked or created at construction: the first request is the first contact.
 
@@ -9873,6 +10286,7 @@ checked here; the store underneath is responsible for it. Returned keys have the
 - `deleteMany(keys: readonly string[]): Promise<void>` — Removes every `prefix + key`. Throws for an invalid key, before deleting any.
 - `getUri(key: string): Promise<string | null>` — The underlying store's URL for `prefix + key`, or `null`. Throws for an invalid key.
 - `async listKeys(prefix = ''): Promise<readonly string[]>` — Lists keys under `prefix` (relative to this store's prefix) in the underlying store's order, with this store's prefix removed.
+- `signedUrl?: SignedDownloads['signedUrl'];` — A short-lived download URL for `prefix + key`; present only when the store underneath has `signedUrl`. Throws for an invalid key.
 - `listPage?: (prefix: string, options?: { readonly after?: string; readonly limit?: number })` — Paged listing with this store's prefix removed from keys and from `next`; present only when the store underneath has `listPage`.
 - `withPrefix(subPrefix: string): ObjectStore` — A store scoped to this prefix followed by `subPrefix`, over the same underlying store (`a/` then `b/` is `a/b/`).
 
@@ -9880,10 +10294,12 @@ checked here; the store underneath is responsible for it. Returned keys have the
 
 Source: `packages/reports/src/store-url.ts`. Import: `@crvouga/atlas/reports/store-url`
 
-Turns a store name (`./folder`, `s3://bucket/prefix`, `r2://…`, `gs://…`, `https://atlas.example.com`) into an opened
-`ObjectStore`, and a list of names (`ATLAS_STORE`, `--store`) into backends with unique ids. Secrets never travel in a
-URL: S3 credentials come from the environment, an Atlas server's token from `ATLAS_TOKEN` (or `ATLAS_TOKEN_<ID>` for a
-named store when several servers are used), and a token is never sent to a server over plain `http://` beyond this machine.
+Turns a store name (`./folder`, `s3://bucket/prefix`, `r2://…`, `gs://…`, `vercel-blob://folder`, `https://atlas.example.com`)
+into an opened `ObjectStore`, and a list of names (`ATLAS_STORE`, `--store`) into backends with unique ids. Secrets never
+travel in a URL: S3 credentials and the Blob token (`BLOB_READ_WRITE_TOKEN`) come from the environment, an Atlas server's
+token from `ATLAS_TOKEN` (or `ATLAS_TOKEN_<ID>` for a named store when several servers are used), and a token is never sent
+to a server over plain `http://` beyond this machine. Extra headers for a server behind a sign-in (`ATLAS_HEADERS`) come
+from the environment too.
 
 See docs/deploying.md#1-where-results-are-kept
 
@@ -9893,11 +10309,13 @@ See docs/deploying.md#1-where-results-are-kept
 export type StoreLocation =
   | { readonly kind: 'directory'; readonly directory: string }
   | { readonly kind: 's3'; readonly bucket: string; readonly prefix: string; readonly region?: string; readonly endpoint?: string; readonly pathStyle?: boolean }
+  /** A folder of the Vercel Blob store that `BLOB_READ_WRITE_TOKEN` belongs to. */
+  | { readonly kind: 'vercel-blob'; readonly prefix: string }
   /** An Atlas server: uploads go to it, and it shows everyone the combined report. */
   | { readonly kind: 'server'; readonly url: string };
 ```
 
-Where a store is, parsed: a `directory`, an S3-compatible `s3` bucket and prefix (with region, endpoint and addressing), or an Atlas `server` URL.
+Where a store is, parsed: a `directory`, an S3-compatible `s3` bucket and prefix (with region, endpoint and addressing), a folder of a Vercel Blob store, or an Atlas `server` URL.
 
 #### `OpenedStore`
 
@@ -9909,6 +10327,8 @@ export type OpenedStore = {
   readonly location: StoreLocation;
   /** The S3 handle, for credential source and ping. */
   readonly s3?: S3Store;
+  /** The Vercel Blob handle, for ping. */
+  readonly blob?: VercelBlobStore;
   /** The server handle, for ping. */
   readonly server?: HttpStore;
 };
@@ -9930,6 +10350,8 @@ Where a store is, from one string:
   `credentialChain`).
 - `r2://bucket/prefix?account=<id>` (Cloudflare R2) and `gs://bucket/prefix` (Google Cloud Storage with
   HMAC keys): the same store with the endpoint filled in. Atlas does not test against these two.
+- `vercel-blob://folder`: a folder of the Vercel Blob store whose read-write token is `BLOB_READ_WRITE_TOKEN`
+  (`vercel-blob://` alone is the whole store). The token is never in the URL.
 
 #### `StoreRole`
 
@@ -13731,3 +14153,117 @@ called inside a Solid root.
 - `navigation`: where the hash, keys and title live (the browser, or a fake).
 
 - `timers`: timer functions for the hash-write debounce and playback.
+
+### Vercel Blob object store
+
+Source: `packages/reports/src/vercel-blob-store.ts`. Import: `@crvouga/atlas/reports/vercel-blob-store`
+
+An `ObjectStore` on Vercel Blob, written without the `@vercel/blob` SDK: its HTTP API is called with `fetch`, the
+same way the S3 store signs its own requests, so it adds nothing to the install and runs on Bun and Node. Objects
+are private and kept under their exact keys (no random suffix, overwrite allowed, so a retried write lands on the
+same key with the same bytes), and are read back with the store's token. `getUri` never returns a URL that works
+without the token: it answers `null`, and the server streams the bytes instead. Importing the module does no work.
+
+See docs/deploying.md#vercel-blob
+See docs/report-contract.md#backends
+
+#### `VercelBlobStoreOptions`
+
+```ts
+export type VercelBlobStoreOptions = {
+  /** A read-write token of the Blob store (`vercel_blob_rw_<store id>_…`). Default: `BLOB_READ_WRITE_TOKEN`. Never put it in a store URL. */
+  readonly token?: string;
+  /** A folder inside the Blob store that holds everything: `atlas/my-project`. */
+  readonly prefix?: string;
+  /** The Blob API. Default: `VERCEL_BLOB_API_URL`, then `https://vercel.com/api/blob`. Set it for a local emulator. */
+  readonly apiUrl?: string;
+  /** Where private objects are read from, given the store id. Default: `https://<store id>.private.blob.vercel-storage.com`. */
+  readonly contentUrl?: (storeId: string) => string;
+  /** The environment variables to read (`BLOB_READ_WRITE_TOKEN`, `VERCEL_BLOB_API_URL`). Default: `process.env`. */
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  /** The `fetch` to send requests with. Default: the global one; inject a fake in tests. */
+  readonly fetch?: typeof fetch;
+  /** Attempts after the first for a request that failed in a way worth retrying. Default 4. */
+  readonly retries?: number;
+  /** For the service to start answering, per attempt, in milliseconds. Default 30 000. */
+  readonly timeoutMs?: number;
+  /** The wait between retries, in milliseconds. Default: a real timer; inject in tests. */
+  readonly sleep?: (ms: number) => Promise<void>;
+};
+```
+
+How to reach a Blob store. Everything is optional: the token comes from `BLOB_READ_WRITE_TOKEN` by default.
+
+#### `VercelBlobError`
+
+```ts
+export class VercelBlobError extends Error
+```
+
+An error from the Blob store. The message names the store folder and what to do; `status` and `code` are what the
+service answered (`forbidden`, `store_not_found`, `rate_limited`, …), `null` when it was never reached. `retryable`
+says whether trying again can help; the store already retried before throwing.
+
+#### `VercelBlobStore`
+
+```ts
+export type VercelBlobStore = ObjectStore & PagedListing & SignedDownloads & {
+  /** A description with no secrets: `vercel-blob://my-project/ (store abc123)`. */
+  readonly label: string;
+  /**
+   * A request someone else may make to write exactly this key, this size and this type, for a short while, without the
+   * store's token: a client token signed with it. For files too large to pass through a serverless function.
+   */
+  uploadTarget(key: string, upload: { readonly size: number; readonly contentType: string; readonly validForMs?: number }): Promise<{ readonly method: 'PUT'; readonly url: string; readonly headers: Readonly<Record<string, string>>; readonly expiresAt: string }>;
+  /** One cheap round trip: can this store be listed with this token? Used by `atlas report doctor`. */
+  ping(): Promise<{ readonly ok: boolean; readonly ms: number; readonly error?: string }>;
+};
+```
+
+An `ObjectStore` on Vercel Blob with paged listing, a secret-free label, and a cheap reachability check.
+
+#### `presignedGet`
+
+```ts
+export async function presignedGet(contentHost: string, pathname: string, until: number, delegationUntil: number, delegationToken: string, clientSigningToken: string): Promise<string>
+```
+
+A presigned GET of one private object, as `@vercel/blob` 2.9 makes one (`presignUrl` with `operation: 'get'`): the
+canonical string `operation=get`, `pathname=…` and, when the URL ends before the delegation, `vercel-blob-valid-until=…`,
+sorted and joined by new lines, signed with HMAC-SHA-256 under the client signing token, base64url.
+
+#### `blobStoreIdOf`
+
+```ts
+export function blobStoreIdOf(token: string): string | null
+```
+
+The store id inside a read-write token: `vercel_blob_rw_<store id>_<secret>`.
+
+#### `vercelBlobStore`
+
+```ts
+export function vercelBlobStore(options: VercelBlobStoreOptions = {}): VercelBlobStore
+```
+
+An {@link ObjectStore} on Vercel Blob. No SDK: the Blob HTTP API is called with `fetch`, so it runs on Bun and Node and adds
+nothing to the install.
+
+Objects are written private, under the exact key (no random suffix), overwriting what is there, with the content type
+given; they are read back from the store's private host with the token, uncached, so an overwrite is seen at once.
+Throttling, server errors and network failures are retried with jittered backoff.
+
+Behaviour to know: the constructor throws when there is no token, or the token is not a read-write token (the store
+id is read from it). `signedUrl` returns a presigned read URL of one object, valid as long as asked (at most the
+hour-long delegation it is signed from), with the stored type and size. `getUri` always answers `null`: a private object has no URL that works without the token, and a
+permanently public one is never handed out. `listKeys` pages through the whole listing and sorts it. `listPage`
+continues from the service's cursor when it is asked for the page after the one it last returned, and otherwise
+lists the prefix and filters it, so it is always correct and usually one request. `deleteMany` sends 100 keys per request.
+
+**Example**
+
+```ts
+const store = vercelBlobStore({ token: process.env.BLOB_READ_WRITE_TOKEN!, prefix: 'my-project/' });
+await store.put('layers/manifests/x.json', bytes, 'application/json');
+const { ok, error } = await store.ping();
+```

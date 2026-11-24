@@ -67,6 +67,10 @@ export const REPORT_USAGE = `atlas report — layered evidence for any kind of s
   rest). Select a project on an Atlas node with --project <slug> or ATLAS_PROJECT. This scopes specs, reports and recordings together.
   When no --store is given, ATLAS_STORE is used. Keys never go in the URL: set
   AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or sign in with \`aws sso login\`, or use a role.
+  vercel-blob://<folder> is a folder of a private Vercel Blob store; its token comes from
+  BLOB_READ_WRITE_TOKEN.
+  For an Atlas server behind a platform's sign-in, ATLAS_HEADERS='name=value,…' adds headers to every
+  request (x-vercel-protection-bypass=<secret>, Cloudflare Access service tokens); values are never printed.
 
   publish   Write one immutable layer: the checks of one producer, on one environment. Safe to repeat.
             --producer is required, unless the --checks file names one

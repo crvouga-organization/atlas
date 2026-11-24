@@ -27,9 +27,12 @@ export class EventHub {
   #id = 0;
   #timer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(options: { readonly maxSubscribers?: number; readonly heartbeatMs?: number } = {}) {
+  readonly #maxStreamMs: number | undefined;
+
+  constructor(options: { readonly maxSubscribers?: number; readonly heartbeatMs?: number; /** End each stream after this long; the viewer reconnects by itself (for hosts that cut long requests). */ readonly maxStreamMs?: number } = {}) {
     this.#max = options.maxSubscribers ?? 500;
     this.#heartbeatMs = options.heartbeatMs ?? 15_000;
+    this.#maxStreamMs = options.maxStreamMs;
   }
 
   /** How many viewers are connected right now. */
@@ -67,6 +70,12 @@ export class EventHub {
         this.#id += 1;
         send(this.#encoder.encode(`id: ${this.#id}\nevent: hello\ndata: ${JSON.stringify(greeting())}\n\n`));
         request.signal.addEventListener('abort', drop, { once: true });
+        // Ended by the server before the host cuts it: the viewer reconnects after `retry` and misses nothing, since it reads the report again.
+        if (this.#maxStreamMs) {
+          const limit = setTimeout(() => subscriber?.close(), this.#maxStreamMs);
+          (limit as { unref?: () => void }).unref?.();
+          request.signal.addEventListener('abort', () => clearTimeout(limit), { once: true });
+        }
       },
       cancel: () => { if (subscriber) this.#subscribers.delete(subscriber); subscriber = null; if (!this.#subscribers.size) this.#stopTimer(); }
     });

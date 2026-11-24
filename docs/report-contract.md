@@ -278,7 +278,7 @@ async methods over keys and bytes:
 It needs nothing else: no transactions, no rename, no locks, no conditional writes. That is what
 lets a plain bucket, a directory and a device lab compose.
 
-Atlas ships two backends, both named by one URL (`openStore`, `--store`, `ATLAS_STORE`):
+Atlas ships three backends, each named by one URL (`openStore`, `--store`, `ATLAS_STORE`):
 
 - `directoryStore(dir)` (`@crvouga/atlas/reports/directory-store`): atomic writes, for a CI workspace, a
   mount or a laptop.
@@ -289,6 +289,10 @@ Atlas ships two backends, both named by one URL (`openStore`, `--store`, `ATLAS_
   environment the way an AWS SDK finds them. It is tested against AWS's published signing vectors and a
   live S3 server in CI. On S3 a missing object answers 403 instead of 404 for an account that cannot list
   the bucket, so publishers need `s3:ListBucket` too (`atlas report policy` prints the permissions).
+- `vercelBlobStore({ token, prefix })` (`@crvouga/atlas/reports/vercel-blob-store`): a private Vercel Blob store,
+  written without the SDK. `vercel-blob://folder`, with the token in `BLOB_READ_WRITE_TOKEN`. Objects are private and
+  kept under their exact keys; `getUri` is always `null`, since a private object has no URL that works without the token
+  ([details](deploying.md#vercel-blob)).
 
 For anything else, write an adapter and prove it:
 

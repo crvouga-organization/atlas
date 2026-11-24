@@ -131,6 +131,42 @@
         "type": "boolean"
       },
       "description": "Features this server has, by name: `events`, `ingest`, `store`, `checks`, `status`, `effective`. A client checks a name before using what it names"
+    },
+    "uploads": {
+      "description": "How this server takes uploads. Absent from a server that predates it: every upload goes through it",
+      "type": "object",
+      "properties": {
+        "directOverBytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Files larger than this go straight to storage (`POST /api/store/<key>?upload=start`, then `?upload=complete`); null when every upload goes through the server"
+        }
+      },
+      "required": [
+        "directOverBytes"
+      ],
+      "additionalProperties": {}
+    },
+    "streamMaxSeconds": {
+      "description": "The longest one /api/events stream lasts before the server ends it and the viewer reconnects; null or absent when streams last until the viewer leaves",
+      "anyOf": [
+        {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [

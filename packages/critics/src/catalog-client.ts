@@ -15,6 +15,7 @@
 import { CatalogEntriesSchema } from '../../schema/src/api';
 import { catalogEntriesParams, type CatalogEntriesQuery, type CatalogEntry } from '../../reports/src/ui-catalog-entries';
 import { sha256Hex } from '../../reports/src/sigv4';
+import { processHeaders } from '../../reports/src/request-headers';
 
 /** How to reach a server. `token` is a `critic`, `publish` or `admin` token for reading the catalog; any token that may read works. */
 export type CatalogClientOptions = {
@@ -119,7 +120,7 @@ export function createCatalogClient(options: CatalogClientOptions): CatalogClien
   const doFetch = options.fetch ?? fetch;
   const sleep = options.sleep ?? defaultSleep;
   const retries = options.retries ?? 3;
-  const headers: Record<string, string> = options.token ? { authorization: `Bearer ${options.token}` } : {};
+  const headers: Record<string, string> = { ...processHeaders(), ...(options.token ? { authorization: `Bearer ${options.token}` } : {}) };
 
   function explain(status: number, said: string | null): CatalogClientError {
     const tail = said ? `: ${said.replace(/[.\s]+$/, '')}` : '';

@@ -591,8 +591,10 @@ The narrowly scoped exceptions are:
 The catalog keeps browsing first: Area, Profile and Sort controls complement the rich search; cards show at most two profile badges and name the remaining count. The gallery opens every profile. Only 24 cards render initially, with Show more. Surface coverage and collection diagnostics live in the **Catalog details** drawer, opened by a quiet header button. They are not rendered on the browsing page; the collection queue is read only while the drawer is open. Surface tables start with 20 rows and retain Show more.
 
 The hash routes (`/`, `/chart/$chartId`, `/specs/$kind`), query contracts, project scoping, streaming,
-report APIs and data adapters remain the migration boundary. `/admin` still serves an independent document:
-it lazily bundles the shared React settings entry once, so API-only servers do not need a prebuilt viewer.
+report APIs and data adapters remain the migration boundary. `/admin` still serves an independent document. `atlas
+client build` prebuilds the shared React settings entry into the site (`admin/settings.js` and `admin/settings.css`),
+which a server without Bun's bundler, such as a Node function, serves. Without a built site, the server lazily bundles
+the entry with Bun once, so API-only servers do not need a prebuilt viewer.
 
 ## Report browsing hierarchy
 

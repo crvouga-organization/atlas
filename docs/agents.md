@@ -104,6 +104,7 @@ The complete public export map is generated from the package manifest (wildcards
 @crvouga/atlas/vitest
 @crvouga/atlas/schema
 @crvouga/atlas/server
+@crvouga/atlas/server/serverless
 @crvouga/atlas/critics
 @crvouga/atlas/critics/uiclip
 @crvouga/atlas/critics/llm

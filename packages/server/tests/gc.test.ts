@@ -28,17 +28,21 @@ async function layersOf(store: ReturnType<typeof storeOn>, days: number[]) {
   for (const day of days) await publishChecks(store, { producer: 'suite', recordedAtMs: day * DAY, checks: [{ id: 'login', title: 'login', status: 'passed', attachments: [{ name: 'log.txt', text: `day ${day} `.repeat(3000) }] }] });
 }
 
-async function setup(options: { gcCheckMs?: number; days?: number[] } = {}) {
+async function setup(options: { gcCheckMs?: number; days?: number[]; gcWaitMs?: number; gcBudgetMs?: number; slowMs?: number; s3?: ReturnType<typeof fakeS3> } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'atlas-gc-'));
   dirs.push(dir);
-  const s3 = fakeS3();
-  await layersOf(storeOn(s3), options.days ?? [1, 2, 3, 4]);
+  const s3 = options.s3 ?? fakeS3();
+  if (!options.s3) await layersOf(storeOn(s3), options.days ?? [1, 2, 3, 4]);
+  // A store that answers slowly, so a pass is still running when it is asked about.
+  const served = options.slowMs ? { ...s3, fetch: (async (input: RequestInfo | URL, init?: RequestInit) => { await new Promise(resolve => setTimeout(resolve, options.slowMs)); return s3.fetch(input, init); }) as typeof s3.fetch } : s3;
   const config = loadServerConfig([], S3_TEST_ENV, dir, () => '{}');
-  const { settings, gc } = storedSettings(config, [], S3_TEST_ENV, dir, userStateStore(storeOn(s3)));
+  const { settings, gc } = storedSettings(config, [], S3_TEST_ENV, dir, userStateStore(storeOn(served)));
   const app = createAtlasServer({
-    backends: [{ id: 's3', store: storeOn(s3) }], write: 's3', settings, gc, now: () => NOW, refreshMs: 60_000,
+    backends: [{ id: 's3', store: storeOn(served) }], write: 's3', settings, gc, now: () => NOW, refreshMs: 60_000,
     tokens: [{ name: 'admin', role: 'admin', token: 'admin-token-123' }, { name: 'ci', role: 'publish', token: 'publish-token-123' }],
-    ...(options.gcCheckMs ? { gcCheckMs: options.gcCheckMs } : {})
+    ...(options.gcCheckMs ? { gcCheckMs: options.gcCheckMs } : {}),
+    ...(options.gcWaitMs !== undefined ? { gcWaitMs: options.gcWaitMs } : {}),
+    ...(options.gcBudgetMs !== undefined ? { gcBudgetMs: options.gcBudgetMs } : {})
   });
   apps.push(app);
   await app.ready;
@@ -180,5 +184,100 @@ describe('applying the policy', () => {
     expect((await call('POST', '/api/settings/gc/run', undefined, { origin: 'http://evil' })).status).toBe(403);
     expect((await call('POST', '/api/settings/gc/run', undefined, { authorization: '' })).status).toBe(401);
     expect((await layerKeys()).length).toBe(4);
+  });
+});
+
+type Pass = { id: string; status: string; dryRun: boolean; progress: Record<string, unknown>; runs: { project: string; deletedLayers: number; deletedBlobs: number; candidateBlobs?: number; candidateBytes?: number; deletedBytes?: number }[] };
+
+describe('garbage collection passes', () => {
+  test('a long pass answers 202 with where to poll; asking again while it runs is the same pass; it runs to the end', async () => {
+    const { save, call, layerKeys, read } = await setup({ gcWaitMs: 0, slowMs: 15 });
+    await save(POLICY);
+    const first = await call('POST', '/api/settings/gc/run');
+    expect(first.status).toBe(202);
+    const pass = await first.json() as Pass;
+    expect(first.headers.get('location')).toBe(`/api/settings/gc/runs/${pass.id}`);
+    expect(pass).toMatchObject({ status: 'running', dryRun: false });
+    const again = await call('POST', '/api/settings/gc/run');
+    expect(again.status).toBe(202);
+    expect((await again.json() as Pass).id).toBe(pass.id);
+    expect((await read() as unknown as { currentPass: Pass | null }).currentPass?.id).toBe(pass.id);
+
+    let polled: Pass = pass;
+    for (let i = 0; i < 400 && polled.status === 'running'; i++) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+      polled = await (await call('GET', first.headers.get('location')!)).json() as Pass;
+    }
+    expect(polled).toMatchObject({ id: pass.id, status: 'done', progress: { projectsDone: 1, deletedLayers: 3, deletedBlobs: 3 } });
+    expect(polled.runs[0]).toMatchObject({ project: 'default', deletedLayers: 3, deletedBlobs: 3 });
+    expect(polled.runs[0]!.deletedBytes).toBeGreaterThan(0);
+    expect((await layerKeys()).length).toBe(1);
+    const settings = await read() as unknown as { currentPass: Pass | null; lastRuns: Pass['runs'] };
+    expect(settings.currentPass).toBeNull();
+    expect(settings.lastRuns[0]).toMatchObject({ deletedLayers: 3 });
+    // A new pass may start once that one is done.
+    const next = await (await call('POST', '/api/settings/gc/run?dryRun=1&wait=1')).json() as Pass;
+    expect(next.id).not.toBe(pass.id);
+  });
+
+  test('?wait=1 answers when the pass is done, as before passes existed', async () => {
+    const { save, call } = await setup({ gcWaitMs: 0, slowMs: 5 });
+    await save(POLICY);
+    const response = await call('POST', '/api/settings/gc/run?wait=1');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: 'done', runs: [{ project: 'default', deletedLayers: 3 }], policy: POLICY });
+  });
+
+  test('a dry run reports the layers, blobs and bytes a real pass deletes, and deletes nothing', async () => {
+    const { save, call, layerKeys, s3 } = await setup();
+    await save(POLICY);
+    const preview = (await (await call('POST', '/api/settings/gc/run?dryRun=1')).json() as Pass).runs[0]!;
+    expect(preview).toMatchObject({ candidates: 3, deletedLayers: 0, deletedBlobs: 0, deletedBytes: 0, candidateBlobs: 3 });
+    expect((await layerKeys()).length).toBe(4);
+    const sizes = new Map([...s3.objects].map(([key, value]) => [key, value.bytes.length]));
+    const run = (await (await call('POST', '/api/settings/gc/run')).json() as Pass).runs[0]!;
+    const freed = [...sizes].filter(([key]) => !s3.objects.has(key) && /^layers\/(manifests|blobs)\//.test(key)).reduce((sum, [, size]) => sum + size, 0);
+    expect(run.deletedBytes).toBe(freed);
+    expect(preview.candidateBytes).toBe(freed);
+    expect(preview.candidateBlobs).toBe(run.deletedBlobs);
+  });
+
+  test('bounded steps on instances that share only the store finish the pass, deleting what one unbounded pass deletes', async () => {
+    const s3 = fakeS3();
+    await layersOf(storeOn(s3), [1, 2, 3, 4, 5, 6]);
+    // Two instances, each allowed no time at all per request: every request moves the pass on by one batch.
+    const a = await setup({ s3, gcBudgetMs: 0 });
+    const b = await setup({ s3, gcBudgetMs: 0 });
+    await a.save(POLICY);
+    let response = await a.call('POST', '/api/settings/gc/run');
+    const id = (await response.json() as Pass).id;
+    let requests = 1;
+    while (response.status === 202 && requests < 50) {
+      // Alternate instances, and alternate polling the pass with asking to run it again.
+      const on = requests % 2 ? b : a;
+      response = requests % 3 ? await on.call('GET', `/api/settings/gc/runs/${id}`) : await on.call('POST', '/api/settings/gc/run');
+      requests += 1;
+    }
+    const pass = await response.json() as Pass;
+    expect(response.status).toBe(200);
+    expect(requests).toBeGreaterThanOrEqual(3);
+    expect(pass).toMatchObject({ id, status: 'done' });
+    expect(pass.runs[0]).toMatchObject({ deletedLayers: 5, deletedBlobs: 5 });
+    expect((await a.layerKeys()).length).toBe(1);
+    expect([...s3.objects.keys()].filter(key => key.startsWith('layers/blobs/')).length).toBe(1);
+    // What the pass kept while it ran is gone, its record stays.
+    expect([...s3.objects.keys()].filter(key => key.startsWith(`server/gc/runs/${id}/`))).toEqual([]);
+    const effective = await (await a.call('GET', '/api/reports/evidence/effective')).json();
+    expect(effective.layers.length).toBe(1);
+  });
+
+  test('a scheduled pass on a bounded host carries on a pass that is under way', async () => {
+    const { save, app, layerKeys } = await setup({ gcBudgetMs: 0, days: [1, 2, 3, 4, 5] });
+    await save(POLICY);
+    let result = await app.maintain!();
+    for (let i = 0; i < 50 && result.pass?.status === 'running'; i++) result = await app.maintain!();
+    expect(result.pass).toMatchObject({ status: 'done' });
+    expect(result.gc?.[0]).toMatchObject({ deletedLayers: 4 });
+    expect((await layerKeys()).length).toBe(1);
   });
 });

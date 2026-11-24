@@ -26,7 +26,7 @@ development and in production.
   the same layers give the same report ([the contract](report-contract.md)).
 
 - [Run it](#run-it) · [Required S3 storage](#required-s3-storage) · [User state and garbage collection](#user-state-and-garbage-collection)
-- [Configuration](#configuration) · [Storage](#storage) · [Tokens and roles](#tokens-and-roles)
+- [Configuration](#configuration) · [Storage](#storage) · [Tokens and roles](#tokens-and-roles) · [Trusted publishing](#trusted-publishing)
 - [Sending results](#sending-results) · [Streaming](#streaming) · [API reference](#api-reference)
 - [What the server refuses](#what-the-server-refuses) · [Performance](#performance) · [Operating it](#operating-it)
 
@@ -109,6 +109,21 @@ what S3 answered, when S3 was reached), never prints a secret, and exits with st
 Credentials that S3 rejects, a bucket that does not exist and a user state object that cannot be read stop the
 server in the same way, with the answer from S3 in the banner. `atlas dev` behaves the same.
 
+### Or a Vercel Blob store
+
+The same storage may be a **private Vercel Blob store** instead of a bucket. It is chosen by `ATLAS_STORAGE=vercel-blob`,
+or without it when `BLOB_READ_WRITE_TOKEN` is set and no `ATLAS_S3_*` variable is, which is what a Vercel project with a
+connected Blob store has. Nothing else changes: it holds the same layers and the same user state, and the server checks
+it the same way before serving, with the Blob variables in the banner.
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `BLOB_READ_WRITE_TOKEN` | yes | Read-write token of a **private** Blob store. Vercel sets it when the store is connected to the project |
+| `ATLAS_BLOB_PREFIX` | no | A folder inside the store for everything Atlas writes. Default: the store root |
+
+To move a deployment from a bucket to Blob, merge its layers across (`atlas report merge --store s3://… --into
+vercel-blob://…`, [details](deploying.md#vercel-blob)).
+
 ## User state and garbage collection
 
 Everything a person using Atlas has chosen is **user state**: one JSON document, `server/state.json` under
@@ -159,6 +174,29 @@ same-origin in browsers) read and save the policy; `POST /api/settings/gc/run` a
 revision is the SHA-256 of the stored document, so saving the policy and saving settings invalidate each other's
 revision: reload, then save. An object store has no conditional writes, so run one server per bucket.
 
+**Passes.** Applying a policy to tens of thousands of layers takes longer than a proxy or a serverless function lets a
+request last, so it runs as a **pass** kept in the store (`server/gc/runs/<id>.json`) rather than inside the request:
+
+- `POST /api/settings/gc/run` starts a pass and answers with it: `200` with every project's run once it is done (a
+  small pass is done before the answer, so the answer is what it always was), or `202 Accepted` with
+  `Location: /api/settings/gc/runs/{id}` while it continues in the background. `?wait=1` waits for the end, as before.
+  `/admin` shows the pass's progress and polls it.
+- There is **one pass at a time**: asking again while one runs answers that one, not a second pass.
+  `GET /api/settings/gc` says which pass is running (`currentPass`), and `GET /api/settings/gc/runs/{id}` how far it has
+  come: the project, its phase (`layers`, `scan`, `blobs`), layers examined and deleted, blobs, bytes.
+- A pass works in **batches** and writes what each batch found to the store before it deletes anything. A pass that is
+  stopped (a restart, a crash, a request that ran out of time) is **carried on** by the next request about it, the
+  schedule or `/api/cron`, from where it was, never started over, and the batches together delete exactly what one
+  uninterrupted pass would. The time ages are judged against is fixed when the pass starts. Two servers could reach for
+  the same pass: a lease in its record keeps them apart, and what is already written makes a repeat harmless.
+- On a host that bounds requests (the [serverless handler](deploying.md#vercel)), each request or scheduled run carries
+  the pass on for at most `ATLAS_GC_BUDGET_SECONDS` (120) and stops; polling the pass, asking to run it again, or the next
+  scheduled run continues it. Elsewhere a pass runs to the end in the background.
+- **A dry run reports what a real pass would free**: per project `candidates` (layers), `candidateBlobs` (captured
+  files only those layers used) and `candidateBytes` (the bytes of those files and of the layers' manifests). A real
+  pass reports the same, plus `deletedLayers`, `deletedBlobs` and `deletedBytes`. Bytes are read from each object's
+  size, without reading the object.
+
 ## Configuration
 
 Everything but the [S3 storage](#required-s3-storage) has a default. Settings come from the settings saved in S3 (the lowest layer), then
@@ -196,6 +234,9 @@ is said in words and the server does not start. The file has a published
 | Folder in the bucket for everything Atlas writes (optional) | `storage.s3.prefix` |  | `ATLAS_S3_PREFIX` | the bucket root |
 | Path-style bucket addressing (`0` for virtual-hosted) (optional) | `storage.s3.pathStyle` |  | `ATLAS_S3_PATH_STYLE` | yes |
 | Session token for temporary credentials (optional) | `storage.s3.sessionToken` |  | `ATLAS_S3_SESSION_TOKEN` | none |
+| Which storage keeps everything: `s3` or `vercel-blob` (a private Blob store, with `BLOB_READ_WRITE_TOKEN` and optionally `ATLAS_BLOB_PREFIX`) | `storage.kind` |  | `ATLAS_STORAGE` | `vercel-blob` when `BLOB_READ_WRITE_TOKEN` is the only storage set, else `s3` |
+| CI repositories that may publish without a token, by OIDC identity: `github:<owner>`, `github:<owner>/<repo>` or `github:<owner>/<repo>@<ref>` (comma-separated; `none` for nobody) | `auth.trustedPublishers` |  | `ATLAS_TRUSTED_PUBLISHERS` | the GitHub owner the server was deployed from on Vercel or Railway, else nobody |
+| The URLs this server is published at (comma-separated); a CI identity token must be addressed to one. Set it when callers reach the server without a platform router in front | `publicUrls` |  | `ATLAS_PUBLIC_URL` | the host each request arrived on |
 | Address to listen on | `host` | `--host <address>` | `ATLAS_HOST`, `HOST` | `127.0.0.1` |
 | Port (`0` picks a free one) | `port` | `--port <n>` | `ATLAS_PORT`, `PORT` | `8080` |
 | The built client | `site` | `--site <dir>` | `ATLAS_SITE` | `./atlas-site`, else built once |
@@ -258,7 +299,41 @@ with `tokenEnv` so the file holds no secret.
   `--insecure` (for when a proxy in front does the signing in).
 - `/healthz` and `/readyz` never need a token, so a load balancer can use them.
 - Only this server's own clients need tokens; Atlas does not do accounts. Put it behind what your company already
-  uses (Cloudflare Access, an ALB with OIDC, `oauth2-proxy`, Tailscale) and TLS ends there too.
+  uses (Cloudflare Access, an ALB with OIDC, `oauth2-proxy`, Tailscale) and TLS ends there too. Machines then reach
+  it with that platform's header in `ATLAS_HEADERS` ([details](deploying.md#a-server-behind-a-sign-in)).
+
+### Trusted publishing
+
+CI can publish **with no secret at all**. A GitHub Actions job with `permissions: id-token: write` asks GitHub for a
+short-lived OIDC token that names its repository, branch and workflow, addressed to this server; `atlas report
+publish`, `atlas report stream`, the reporters and `httpStore` do this by themselves when no `ATLAS_TOKEN` is set. The
+server accepts the token as a **publish** token (it may upload and read, so the gate needs no secret either) when:
+
+- GitHub's signature verifies (the keys are fetched from GitHub and cached), it has not expired, and its audience is
+  this server, so a token minted for another server is useless here;
+- its repository is on the allowlist, `ATLAS_TRUSTED_PUBLISHERS`: `github:<owner>`, `github:<owner>/<repo>` or
+  `github:<owner>/<repo>@<ref>`, comma-separated (`none` trusts nobody);
+- the owner's numeric GitHub id is the one first seen under that name. The pin is kept in the store
+  (`server/trusted-publishers.json`), so an account renamed or re-registered under the same name is not trusted.
+
+**Without `ATLAS_TRUSTED_PUBLISHERS`**, a server deployed by Vercel or Railway from a GitHub repository trusts that
+repository's owner, which is every repository of the same account or organization. Pull requests from forks are
+given no identity token, so they cannot publish. People looking at the report, critics and administrators still need
+tokens, and a server with trusted publishers but no tokens serves no one who is not CI.
+
+When people can reach the server without a platform's router in front (a VM with a public address), set
+`ATLAS_PUBLIC_URL` to its URL: the token's audience is then checked against it rather than against the Host header a
+caller chose. An IP allowlist would not do the same job: GitHub's hosted runners share their addresses with every other
+GitHub user.
+
+```yaml
+permissions:
+  id-token: write
+env:
+  ATLAS_STORE: https://atlas.example.com
+steps:
+  - run: npx atlas report publish --producer unit --junit out.xml
+```
 
 ## Sending results
 
@@ -340,6 +415,19 @@ edit, and the server's time. Nothing about the layer, its results or the report'
 
 See [Tagging artifacts and demos](rich-evidence.md#tagging-artifacts-and-demos) for the tag rules. Reviewer tags are
 shown in the viewer's evidence; the tests API (`artifactTag`) searches the producers' tags.
+
+## Recordings from the store
+
+A server can send a browser that plays or downloads a run's recording (`/api/data/runs/<id>/<file>`) straight to the store
+instead of streaming every byte itself: `createAtlasServer({ redirectDownloads: true })`, which the serverless handler
+turns on (`ATLAS_REDIRECT_DOWNLOADS=0` to keep it off). After the read role is checked, a request whose `sec-fetch-dest` is
+`video`, `audio` or `document` for an object whose **stored** type is video, audio or zip is answered `302` to a URL of the
+store that works for five minutes (S3 presigns one; Vercel Blob signs one from an hour-long delegation, so one API request
+serves many downloads). The browser sends its `Range` there, and the store serves it from its own origin, which can reach
+nothing of Atlas's. Everything else is served by the server as before: pages, SVG, images and unknown types; requests
+from scripts (which would need the store to allow this origin) and from clients that are not browsers; stores that cannot
+sign; and attachments of test results, which are packed several to a compressed chunk, so the store holds no object that
+is just that file. Leave it off when browsers cannot reach the store's address (a bucket on a private network).
 
 ## Reading recordings back
 
@@ -499,6 +587,7 @@ curl "$ATLAS_SERVER_URL/api/projects/$ATLAS_PROJECT/reports/tests?format=markdow
 | `GET /api/settings/gc` | admin | Read the garbage collection policy. |
 | `PUT /api/settings/gc` | admin | Save the garbage collection policy. |
 | `POST /api/settings/gc/run` | admin | Collect garbage now, or preview it. |
+| `GET /api/settings/gc/runs/{id}` | admin | How far a garbage collection pass has come. |
 | `GET /healthz` | none | Is the process up. |
 | `GET /readyz` | none | Has the server read its backends. |
 | `GET /api/openapi.json` | none | This document. |
@@ -520,6 +609,8 @@ curl "$ATLAS_SERVER_URL/api/projects/$ATLAS_PROJECT/reports/tests?format=markdow
 | `HEAD /api/projects/{project}/store/{key}` | read | Does an object exist. |
 | `PUT /api/store/{key}` | critic | Upload an object. |
 | `PUT /api/projects/{project}/store/{key}` | critic | Upload an object. |
+| `POST /api/store/{key}` | publish | Send a large file straight to storage. |
+| `POST /api/projects/{project}/store/{key}` | publish | Send a large file straight to storage. |
 | `DELETE /api/store/{key}` | publish | Remove a scratch object. |
 | `DELETE /api/projects/{project}/store/{key}` | publish | Remove a scratch object. |
 | `GET /api/reports/tests` | read | Every test, with insights, facets and history statistics. |
@@ -657,6 +748,14 @@ What makes it so, none of it at the cost of the contract:
 
 - **A layer is read once.** The report is folded incrementally; only layers that still hold a winner are kept, so
   memory follows the number of checks and not the age of the project.
+- **A start reads a checkpoint, not every layer.** The server keeps what folding each layer needs in its storage
+  (`server/checkpoint/v1/`: gzip segments of 500 layers and a head naming them with their SHA-256), written after a
+  change at most every 5 minutes (30 seconds on a serverless host). A start lists the catalog and folds each layer the
+  checkpoint holds from it, so the catalog still decides what takes part: a layer garbage collection deleted is left
+  out, and one the checkpoint does not know is read as before. The report is exactly the one every layer makes. A head
+  or segment that cannot be read, is of another format or does not match its digest is ignored with a log line, and
+  everything is read and the checkpoint written again. With 25 000 layers and 50 ms per storage request, a start takes
+  about 1.2 s and 121 requests instead of two requests per layer (the bench measures it as *start from the checkpoint*).
 - **A change costs one layer.** Each layer remembers the JSON of what it sends, the version is a hash of per-layer
   digests, and a delta lists only layers that changed, so the work to take in a result does not grow with the
   report.

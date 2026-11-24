@@ -151,6 +151,10 @@ async function probeNode(runtime: string, args: string[], cwd: string, env: Node
     if (after.layers.length <= effective.layers.length) throw new Error('an uploaded layer did not reach the report');
     const page = await (await fetch(`${url}/`)).text();
     if (!page.includes('__ATLAS_CONFIG__') || !page.includes('<div id="root">')) throw new Error('the node did not serve the viewer with its address book');
+    // The settings page comes prebuilt with the site, so it is the real interface on Node too, where Bun cannot bundle it.
+    const admin = await fetch(`${url}/admin`);
+    const settings = await admin.text();
+    if (admin.status !== 200 || !settings.includes('<script type="module">') || settings.includes('has no prebuilt settings page')) throw new Error(`/admin under ${runtime} did not serve the settings interface (${admin.status})`);
   } finally {
     child.removeAllListeners('exit');
     const exited = new Promise<number | null>((resolve) => child.on('exit', resolve));

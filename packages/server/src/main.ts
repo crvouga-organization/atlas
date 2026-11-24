@@ -2,7 +2,7 @@
  * @module `atlas serve`
  *
  * Starts the Atlas server from its configuration. Storage comes first and is not optional: the required `ATLAS_S3_*`
- * variables are checked (every problem listed together), the bucket is proven reachable and writable, and the user
+ * (or Vercel Blob) variables are checked (every problem listed together), the storage is proven reachable and writable, and the user
  * state (garbage collection policy and saved settings) is read from it, all before anything listens. Any failure prints
  * a banner naming every variable and exits 2; there is no fallback to a local folder, memory or a database. Then it
  * finds or builds the client, listens at once (so a liveness probe finds the process while a large bucket is still being
@@ -15,30 +15,37 @@ import path from 'node:path';
 
 import type { BackendInput } from '../../reports/src/compose';
 import { s3Store } from '../../reports/src/s3-store';
+import { vercelBlobStore } from '../../reports/src/vercel-blob-store';
 import { createAtlasServer, type AtlasServerOptions } from './app';
 import { ConfigError, loadServerConfig, SERVER_USAGE, type ResolvedServerConfig } from './config';
 import { listen } from './host';
 import { storedSettings } from './settings';
 import { findSite } from './site';
-import { describeS3, inspectS3Env, S3ConfigError, startupFailure } from './storage';
+import { describeStorage, inspectStorageEnv, S3ConfigError, startupFailure } from './storage';
+import { describeRule, TrustedPublishers } from './trusted-publishing';
 import { USER_STATE_KEY, UserStateError, userStateStore, type StoredUserState } from './user-state';
 
 type Env = Readonly<Record<string, string | undefined>>;
 /** What `serveMain` and `devMain` are given besides arguments: where output goes, and, for tests and embedding, the environment, working directory, the `fetch` S3 requests are sent with, and an `AbortSignal` that stops the server (otherwise SIGTERM and SIGINT do). */
 export type ServeIo = { readonly out: (text: string) => void; readonly env?: Env; readonly cwd?: string; readonly signal?: AbortSignal; readonly fetch?: typeof fetch };
 
-/** The id of the one backend: the S3 bucket. */
+/** The id of the one backend: the S3 bucket (or Vercel Blob store; the id stays the same so a deployment can move between them). */
 export const S3_BACKEND_ID = 's3';
 
-/** Open the S3 bucket named by a configuration, with exactly the credentials it gives (no ambient AWS lookup). Nothing is contacted yet. */
+/** Open the storage named by a configuration, with exactly the credentials it gives (no ambient AWS lookup). Nothing is contacted yet. */
 export function openConfiguredBackends(config: ResolvedServerConfig, fetchImpl?: typeof fetch): (BackendInput & { readonly writable: boolean })[] {
-  const { s3 } = config;
+  const { storage } = config;
+  if (storage.kind === 'vercel-blob') {
+    const blob = vercelBlobStore({ token: storage.blob.token, prefix: storage.blob.prefix, env: {}, ...(storage.blob.apiUrl ? { apiUrl: storage.blob.apiUrl } : {}), ...(fetchImpl ? { fetch: fetchImpl } : {}) });
+    return [{ id: S3_BACKEND_ID, label: describeStorage(storage), store: blob, writable: true }];
+  }
+  const { s3 } = storage;
   const store = s3Store({
     bucket: s3.bucket, prefix: s3.prefix, region: s3.region, endpoint: s3.endpoint, forcePathStyle: s3.pathStyle,
     credentials: { accessKeyId: s3.accessKeyId, secretAccessKey: s3.secretAccessKey, ...(s3.sessionToken ? { sessionToken: s3.sessionToken } : {}) },
     env: {}, ...(fetchImpl ? { fetch: fetchImpl } : {})
   });
-  return [{ id: S3_BACKEND_ID, label: describeS3(s3), store, writable: true }];
+  return [{ id: S3_BACKEND_ID, label: describeStorage(storage), store, writable: true }];
 }
 
 /** Can the server use the bucket? Said at the start, not at the first upload: list, write, read back and delete. */
@@ -56,7 +63,7 @@ async function probeStorage(backend: BackendInput): Promise<string | null> {
 }
 
 /** What `createAtlasServer` is given for a configuration: `atlas serve` and `atlas dev` run the same server. */
-export function serverOptionsOf(config: ResolvedServerConfig, backends: ReturnType<typeof openConfiguredBackends>, log?: (line: Record<string, unknown>) => void): AtlasServerOptions {
+export function serverOptionsOf(config: ResolvedServerConfig, backends: ReturnType<typeof openConfiguredBackends>, log?: (line: Record<string, unknown>) => void, fetchImpl?: typeof fetch): AtlasServerOptions {
   const branches = config.include.branches;
   const include = branches?.length || config.include.ignoreModified
     ? (layer: { readonly branch: string | null; readonly freshness?: 'unknown' | 'modified' }) => (!branches?.length || (layer.branch !== null && branches.includes(layer.branch))) && (!config.include.ignoreModified || layer.freshness === undefined)
@@ -64,6 +71,7 @@ export function serverOptionsOf(config: ResolvedServerConfig, backends: ReturnTy
   return {
     backends, write: S3_BACKEND_ID,
     tokens: config.tokens, anonymousRead: config.anonymousRead,
+    ...(config.trustedPublishers.length ? { trust: new TrustedPublishers({ rules: config.trustedPublishers, store: backends[0]!.store, ...(config.publicUrls.length ? { audiences: config.publicUrls } : {}), ...(log ? { log } : {}), ...(fetchImpl ? { fetch: fetchImpl } : {}) }) } : {}),
     ...(config.outlineBranch ? { outlineBranch: config.outlineBranch } : {}), ...(include ? { include } : {}),
     ...(config.catalog.roots.length ? { catalogRoots: config.catalog.roots } : {}),
     runTimeoutMs: config.runTimeoutSeconds * 1000, runStallMs: config.runStallSeconds * 1000, refreshMs: config.refreshSeconds * 1000, limits: config.limits, heartbeatMs: config.heartbeatSeconds * 1000,
@@ -84,11 +92,11 @@ const gcLine = (stored: StoredUserState) => stored.state.gc
 export async function connectStorage(config: ResolvedServerConfig, env: Env, io: Pick<ServeIo, 'fetch'>): Promise<{ readonly backends: ReturnType<typeof openConfiguredBackends>; readonly stored: StoredUserState } | { readonly failure: string }> {
   const backends = openConfiguredBackends(config, io.fetch);
   const problem = await probeStorage(backends[0]!);
-  if (problem) return { failure: startupFailure(inspectS3Env(env), `the S3 storage ${describeS3(config.s3)} cannot be used with these settings`, problem) };
+  if (problem) return { failure: startupFailure(inspectStorageEnv(env, config.storage.kind), `the storage ${describeStorage(config.storage)} cannot be used with these settings`, problem, config.storage.kind) };
   try {
     return { backends, stored: await userStateStore(backends[0]!.store).read() };
   } catch (error) {
-    if (error instanceof UserStateError) return { failure: startupFailure(inspectS3Env(env), 'the user state stored in S3 cannot be read', error.message) };
+    if (error instanceof UserStateError) return { failure: startupFailure(inspectStorageEnv(env, config.storage.kind), 'the user state stored in object storage cannot be read', error.message, config.storage.kind) };
     throw error;
   }
 }
@@ -118,7 +126,8 @@ export async function serveMain(argv: readonly string[], io: ServeIo): Promise<n
       throw error;
     }
   }
-  io.out(`${config.configFile ? `Configuration ${path.relative(cwd, config.configFile) || config.configFile}. ` : ''}Storage: ${describeS3(config.s3)}. All reports and user state live there.\n`);
+  io.out(`${config.configFile ? `Configuration ${path.relative(cwd, config.configFile) || config.configFile}. ` : ''}Storage: ${describeStorage(config.storage)}. All reports and user state live there.\n`);
+  io.out(config.trustedPublishers.length ? `Trusted publishers (CI may publish without a token): ${config.trustedPublishers.map(describeRule).join(', ')}, from ${config.trustedPublishersSource}.\n` : '');
   io.out(gcLine(stored));
 
   const site = await findSite(config.site, cwd, io.out);

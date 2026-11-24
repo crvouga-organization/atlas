@@ -152,11 +152,26 @@ Responses: `200` The saved policy and the new revision.; `401` No token, or an u
 
 `POST /api/settings/gc/run` · role: admin
 
-Applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what it would delete (a disabled policy is previewed as if enabled). Answers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.
+Starts a pass that applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what a real pass would delete: layers, blobs (`candidateBlobs`) and bytes (`candidateBytes`). A disabled policy is previewed as if enabled.
+
+The pass runs in the background and is kept in the store. The answer is the pass: `200` with every run once it is done (a small pass is done before the answer), `202` with `Location: /api/settings/gc/runs/{id}` to poll while it runs. `wait=1` waits for the end, as this operation did before passes existed. There is only one pass at a time: asking again while one runs answers that one. On a host that bounds requests (serverless), each request carries the pass on for a limited time and the next request, poll or scheduled pass continues it.
+
+Answers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.
 
 - `dryRun` (query): `1` or `true` to only count what would be deleted.
+- `wait` (query): `1` or `true` to answer only when the pass is done.
 
-Responses: `200` One run per project.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `409` No policy has been saved, or it is disabled.
+Responses: `200` The finished pass, with one run per project.; `202` The pass, still running: poll its `Location`.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `409` No policy has been saved, or it is disabled.
+
+### How far a garbage collection pass has come
+
+`GET /api/settings/gc/runs/{id}` · role: admin
+
+A pass by its id: `running`, `done` or `failed`, its progress (projects, the phase of the current one, layers examined and deleted, blobs, bytes) and the runs of the projects finished so far. `200` once it is done, `202` while it runs. A running pass that no process is carrying on (its step ran out of time, or its server restarted) is carried on by this request: in the background on a long-running server, for a bounded time on a serverless host. Finished passes are kept for a while, then forgotten (`404`).
+
+- `id` (path, required): The pass id from `POST /api/settings/gc/run`.
+
+Responses: `200` The finished pass.; `202` The pass, still running.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `404` No such pass.
 
 ### Is the process up
 
@@ -457,6 +472,44 @@ Scoped to one project. The same project may be selected on the unprefixed API us
 - `content-type` (header): Stored with the object and returned when it is read.
 
 Responses: `200` Already there with the same bytes.; `201` Stored.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `409` A dependency has not been uploaded yet, or other bytes are already stored under this key.; `413` Over `limits.maxObjectMiB`.; `422` Not a key Atlas writes, or the content is not what its name says.
+
+### Send a large file straight to storage
+
+`POST /api/store/{key}` · role: publish
+
+For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.
+
+1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
+2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).
+3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
+
+Only files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.
+
+- `key` (path, required): An object key under `layers/`, such as `layers/manifests/<id>.json`. It contains slashes, which are not percent-encoded; every other character is.
+- `upload` (query): `start` or `complete`.
+- `project` (query): Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.
+
+Responses: `200` `start`: where to send the bytes, or that the blob is already there.; `201` `complete`: checked and accepted.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `404` This server takes uploads only through `PUT`.; `413` Over `limits.maxObjectMiB`.; `422` Not a file key, nothing arrived, or what arrived is not what its name says (and was deleted).
+
+### Send a large file straight to storage
+
+`POST /api/projects/{project}/store/{key}` · role: publish
+
+For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.
+
+1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
+2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).
+3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
+
+Only files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.
+
+Scoped to one project. The same project may be selected on the unprefixed API using ?project= or X-Atlas-Project. Unknown projects return 404 on reads and are created by an authenticated upload.
+
+- `project` (path, required): Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.
+- `key` (path, required): An object key under `layers/`, such as `layers/manifests/<id>.json`. It contains slashes, which are not percent-encoded; every other character is.
+- `upload` (query): `start` or `complete`.
+
+Responses: `200` `start`: where to send the bytes, or that the blob is already there.; `201` `complete`: checked and accepted.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `404` This server takes uploads only through `PUT`.; `413` Over `limits.maxObjectMiB`.; `422` Not a file key, nothing arrived, or what arrived is not what its name says (and was deleted).
 
 ### Remove a scratch object
 
@@ -1760,19 +1813,19 @@ Responses: `200` The index.; `401` No token, or an unknown one. Send `Authorizat
 
 `GET /api/data/runs/{id}/{path}` · role: read
 
-A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable.
+A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable. On a server that sends downloads from the store (the serverless handler does), a browser playing or downloading a recording (`sec-fetch-dest` of `video`, `audio` or `document`, a stored type of video, audio or zip) is answered `302` to a URL of the store that works for five minutes and needs no token; the role is checked first. Every other request gets the bytes.
 
 - `id` (path, required): The run id.
 - `path` (path, required): The path inside the run.
 - `project` (query): Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.
 
-Responses: `200` The file.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `404` No such run or file.
+Responses: `200` The file.; `302` A recording, from the store: follow `Location` (a five-minute URL; send the same `Range`).; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `404` No such run or file.
 
 ### A file of an uploaded run
 
 `GET /api/projects/{project}/data/runs/{id}/{path}` · role: read
 
-A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable.
+A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable. On a server that sends downloads from the store (the serverless handler does), a browser playing or downloading a recording (`sec-fetch-dest` of `video`, `audio` or `document`, a stored type of video, audio or zip) is answered `302` to a URL of the store that works for five minutes and needs no token; the role is checked first. Every other request gets the bytes.
 
 Scoped to one project. The same project may be selected on the unprefixed API using ?project= or X-Atlas-Project. Unknown projects return 404 on reads and are created by an authenticated upload.
 
@@ -1780,4 +1833,4 @@ Scoped to one project. The same project may be selected on the unprefixed API us
 - `id` (path, required): The run id.
 - `path` (path, required): The path inside the run.
 
-Responses: `200` The file.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `404` No such run or file.
+Responses: `200` The file.; `302` A recording, from the store: follow `Location` (a five-minute URL; send the same `Range`).; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `404` No such run or file.

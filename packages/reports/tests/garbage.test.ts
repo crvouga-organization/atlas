@@ -75,7 +75,7 @@ describe('garbage collection', () => {
     expect(plan.candidates.length).toBe(2);
     const outcome = await collectGarbage(store, plan);
     // Layer 1's own file goes; layer 2 shared its file with layer 3, which stays, so that file stays.
-    expect(outcome).toEqual({ deletedLayers: 2, deletedBlobs: 1 });
+    expect(outcome).toMatchObject({ deletedLayers: 2, deletedBlobs: 1 });
     expect(await blobs()).toBe(1);
     const after = new ReportIndex([{ id: 's3', store }], { now: () => NOW });
     await after.refresh();
@@ -108,6 +108,6 @@ describe('garbage collection', () => {
     const { store, index } = await seed([1, 2, 3]);
     const plan = await planGarbage(store, { policy: policy({ keepLatest: 1 }), nowMs: NOW, eligible: index.superseded() });
     await collectGarbage(store, plan);
-    expect(await collectGarbage(store, plan)).toEqual({ deletedLayers: 0, deletedBlobs: 0 });
+    expect(await collectGarbage(store, plan)).toMatchObject({ deletedLayers: 0, deletedBlobs: 0 });
   });
 });

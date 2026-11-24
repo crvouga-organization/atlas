@@ -4,7 +4,9 @@
  * The `ObjectStore` interface over HTTP at `/api/store`: list keys under `layers/`, read and probe an object, upload one
  * (checked by `validateUpload`, immutable once stored) and remove a scratch object. This is what `httpStore` talks to. An
  * upload is told to the report only after it is stored, and a layer's manifest, parsed while it was checked, is handed on so
- * it is not read again. Everything read is served as untrusted bytes (never sniffed, never run).
+ * it is not read again. Everything read is served as untrusted bytes (never sniffed, never run). Where the storage can take
+ * a file from a publisher directly (`direct`), `POST /api/store/<key>?upload=start` says where to send a large file and
+ * `?upload=complete` checks what arrived, as an upload is checked, before it counts.
  *
  * @see docs/server.md#the-store-protocol
  */
@@ -26,7 +28,21 @@ export type StoreApiOptions = {
   readonly maxObjectBytes: number;
   /** Told after something was uploaded: its key, and what kind of thing it is. */
   readonly onStored: (key: string, kind: string, layer?: ReportLayer) => void | Promise<void>;
+  /**
+   * Where a publisher may send a large file's bytes itself, straight to the storage (a host whose functions refuse large
+   * request bodies). Without it, `POST /api/store/<key>?upload=…` answers 404 and publishers upload through the server.
+   */
+  readonly direct?: DirectUploads;
 };
+
+/** A request a publisher makes to the storage itself: what `POST /api/store/<key>?upload=start` answers. */
+export type UploadTarget = { readonly method: 'PUT'; readonly url: string; readonly headers: Readonly<Record<string, string>>; readonly expiresAt: string };
+
+/** How the storage takes a file straight from a publisher: a short-lived request good for one key, one size and one type. */
+export type DirectUploads = { target(key: string, upload: { readonly size: number; readonly contentType: string }): Promise<UploadTarget> };
+
+/** The kinds of object that may go straight to storage: files, which can be large. Everything that makes them visible still comes through the server. */
+const DIRECT_KINDS = new Set(['blob', 'run-file']);
 
 /** Read a request body, refusing as soon as it is over the limit rather than after holding it all. */
 export async function readLimited(request: Request, limit: number): Promise<Uint8Array> {
@@ -168,6 +184,49 @@ export function storeApi(options: StoreApiOptions) {
         // Catalog entries make a layer, spec set or run visible, so everyone is told only once they are in.
         if (present === 'absent' || isCatalog(kind)) await options.onStored(name, kind, kind === 'layer-catalog' ? recent.get(classify(name)?.id ?? '') : undefined);
         return c.json({ ok: true, key: name, kind, created: present === 'absent' }, present === 'absent' ? 201 : 200);
+      });
+    } catch (error) {
+      if (error instanceof Refusal) return refuse(c, error.status, error.message);
+      throw error;
+    }
+  });
+
+  // A large file, straight to storage: the server says where (after the same checks as an upload), the publisher sends
+  // the bytes there, and the server then checks what arrived exactly as it checks an upload, deleting it if it fails.
+  app.post('/*', async c => {
+    const verdict = auth.check(c.req.raw, 'publish');
+    if (!verdict.ok) return refuse(c, verdict.status, verdict.message);
+    const step = c.req.query('upload');
+    if (!options.direct || (step !== 'start' && step !== 'complete')) return refuse(c, 404, 'This server takes uploads in the request body: PUT /api/store/<key>');
+    const name = key(c);
+    if (name === null || !validKey(name)) return refuse(c, 422, 'Not a key Atlas holds');
+    const kind = classify(name)?.kind;
+    if (!kind || !DIRECT_KINDS.has(kind)) return refuse(c, 422, 'Only files (blobs and run files) go straight to storage; upload the rest with PUT');
+    if (step === 'start') {
+      const body = await c.req.json().catch(() => null) as { size?: unknown; contentType?: unknown } | null;
+      const size = Number(body?.size);
+      const contentType = typeof body?.contentType === 'string' && /^[\w.+-]+\/[\w.+-]+/.test(body.contentType) ? body.contentType : 'application/octet-stream';
+      if (!Number.isSafeInteger(size) || size < 0) return refuse(c, 422, 'Say the size of the file in bytes');
+      if (size > options.maxObjectBytes) return refuse(c, 413, `An object may be at most ${Math.floor(options.maxObjectBytes / 1048576)} MiB`);
+      // A blob is named for its content: one already there is this one, and needs no bytes.
+      if (kind === 'blob' && (await store.head(name))) return c.json({ exists: true });
+      return c.json({ exists: false, ...(await options.direct.target(name, { size, contentType })) }, 200, { 'cache-control': 'no-store' });
+    }
+    try {
+      return await exclusive(name, async () => {
+        const stored = await store.get(name);
+        if (!stored) return refuse(c, 422, `Nothing arrived at ${name}: send the bytes to the upload target first`);
+        if (stored.size > options.maxObjectBytes) { await stored.body.cancel(); await store.delete(name); return refuse(c, 413, 'What arrived is larger than the server accepts'); }
+        const bytes = await readBytes(stored.body);
+        try {
+          await validateUpload(name, bytes, store);
+        } catch (error) {
+          // What fails the checks never becomes part of a report.
+          if (error instanceof Refusal) { await store.delete(name); return refuse(c, 422, error.message); }
+          throw error;
+        }
+        await options.onStored(name, kind);
+        return c.json({ ok: true, key: name, kind, created: true }, 201);
       });
     } catch (error) {
       if (error instanceof Refusal) return refuse(c, error.status, error.message);

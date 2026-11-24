@@ -5,7 +5,7 @@
  * partitioned by prefix, and prefixes compose. It guards the keys it is given (no leading `/`, no `..`) so a scoped
  * store cannot reach outside its prefix by key.
  */
-import type { ObjectStore, PagedListing, StoredObject } from './object-store';
+import type { ObjectStore, PagedListing, SignedDownloads, StoredObject } from './object-store';
 import { assertLogicalObjectKey } from './namespace-guard';
 
 /** Returns `prefix` with exactly one trailing `/` added when missing. Throws `ObjectStoreWithPrefix: prefix must be non-empty` for an empty prefix. */
@@ -46,6 +46,8 @@ export class ObjectStoreWithPrefix implements ObjectStore {
         return { keys: page.keys.map(key => key.slice(this.prefix.length)), next: page.next === null ? null : page.next.slice(this.prefix.length) };
       };
     }
+    const sign = (inner as Partial<SignedDownloads>).signedUrl;
+    if (sign) this.signedUrl = (key, options) => sign.call(inner, this.scopedKey(key), options);
   }
 
   private scopedKey(key: string): string {
@@ -89,6 +91,9 @@ export class ObjectStoreWithPrefix implements ObjectStore {
     const keys = await this.inner.listKeys(scopedPrefix);
     return keys.map((k) => k.slice(this.prefix.length));
   }
+
+  /** A short-lived download URL for `prefix + key`; present only when the store underneath has `signedUrl`. Throws for an invalid key. */
+  signedUrl?: SignedDownloads['signedUrl'];
 
   /** Paged listing with this store's prefix removed from keys and from `next`; present only when the store underneath has `listPage`. */
   listPage?: (prefix: string, options?: { readonly after?: string; readonly limit?: number }) => Promise<{ readonly keys: readonly string[]; readonly next: string | null }>;
