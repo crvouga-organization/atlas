@@ -409,7 +409,7 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
   app.patch('/api/live/:id', c => writeLive(c, 'update'));
   app.post('/api/live/:id/heartbeat', c => writeLive(c, 'heartbeat'));
 
-  app.get('/admin', async c => c.html(await renderSettingsPage(), 200, { 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'x-content-type-options': 'nosniff' }));
+  app.get('/admin', async c => c.html(await renderSettingsPage(options.site), 200, { 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'x-content-type-options': 'nosniff' }));
   app.get('/api/settings', async c => {
     const verdict = auth.check(c.req.raw, 'admin');
     if (!verdict.ok) return unauthorized(verdict);

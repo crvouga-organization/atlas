@@ -58,8 +58,7 @@ thing: bump `@crvouga/atlas` in `package.json`.
   would need Vercel's bypass secret as well (`ATLAS_HEADERS='x-vercel-protection-bypass=…'`). Atlas's own tokens decide
   who may look.
 - **Garbage collection** is off until a policy is saved. The daily `/api/cron` run applies it once `CRON_SECRET` is set
-  in the project; Vercel Cron sends it. Without Bun's bundler at runtime, `/admin` explains how to save a policy through
-  the API instead.
+  in the project; Vercel Cron sends it. Save the policy at `/admin` with the admin token: the build prebuilds that page.
 - **Live updates** come over a stream that the server ends every 4 minutes, before Vercel's time limit; the viewer
   reconnects on its own.
 

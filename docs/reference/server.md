@@ -893,8 +893,10 @@ export const GET = handle, POST = handle, PUT = handle, DELETE = handle, HEAD = 
 Source: `packages/server/src/settings-page.ts`
 
 @module Settings page
-The administrator's React and Mantine entry point, bundled lazily for API-only servers too.
-Credentials remain in page memory; the settings API owns authorization and validation.
+The administrator's React and Mantine entry point. A built site carries it prebuilt (`admin/settings.js` and
+`admin/settings.css`, written by `atlas client build`), which is what a server without Bun's bundler (a Node function)
+serves; otherwise it is bundled lazily with Bun, for API-only servers too. Credentials remain in page memory; the
+settings API owns authorization and validation.
 
 #### `SETTINGS_PAGE`
 
@@ -904,19 +906,29 @@ export const SETTINGS_PAGE = …
 
 Document shell for the shared React settings UI. No configuration or credentials are embedded.
 
+#### `PREBUILT_SETTINGS`
+
+```ts
+export const PREBUILT_SETTINGS = …
+```
+
+Where a built site keeps the prebuilt settings page, relative to the site.
+
 #### `renderSettingsPage`
 
 ```ts
-export function renderSettingsPage(): Promise<string>
+export function renderSettingsPage(site?: string): Promise<string>
 ```
 
-Render the settings UI with the same provider and theme as the viewer. Bundle once on first request,
-without a prebuilt viewer, CDN, configuration data, or import-time work. A failed build can be retried.
+Render the settings UI with the same provider and theme as the viewer. With a built `site` that carries the prebuilt
+page (`atlas client build` writes it), that page, read once; otherwise bundled with Bun once on first request; on a
+runtime with neither, a page that says how to change settings without it. No configuration data, no import-time work,
+and a failed build can be retried.
 
 **Example**
 
 ```ts
-const html = await renderSettingsPage();
+const html = await renderSettingsPage(options.site);
 ```
 
 ### settings.ts

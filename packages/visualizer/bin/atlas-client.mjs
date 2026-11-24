@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -95,6 +95,39 @@ function assertSafeOut(out, base) {
   }
 }
 
+/**
+ * The server's settings page (`/admin`), bundled with the site so a server without Bun's bundler (a Node function) can
+ * serve it: one script and one stylesheet in `<out>/admin/`, which the server puts in its page shell. Built with Vite and
+ * nothing of the viewer's configuration, since the page reads no data and has no configuration of its own.
+ */
+async function buildSettingsPage(out) {
+  const { build } = await import('vite');
+  const { default: react } = await import('@vitejs/plugin-react');
+  const result = await build({
+    configFile: false,
+    root: APP_ROOT,
+    publicDir: false,
+    logLevel: 'error',
+    plugins: [react()],
+    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
+    build: {
+      write: false,
+      minify: true,
+      cssCodeSplit: false,
+      // One self-contained script and stylesheet: nothing else is fetched when the page loads.
+      assetsInlineLimit: () => true,
+      rollupOptions: { input: path.join(APP_ROOT, 'src/admin/main.tsx'), output: { format: 'es', inlineDynamicImports: true } }
+    }
+  });
+  const outputs = (Array.isArray(result) ? result : [result]).flatMap((item) => item.output);
+  const js = outputs.filter((item) => item.type === 'chunk').map((item) => item.code).join('\n');
+  const css = outputs.filter((item) => item.type === 'asset' && item.fileName.endsWith('.css')).map((item) => String(item.source)).join('\n');
+  if (!js) throw new Error('The settings page bundle is empty');
+  mkdirSync(path.join(out, 'admin'), { recursive: true });
+  writeFileSync(path.join(out, 'admin', 'settings.js'), js);
+  writeFileSync(path.join(out, 'admin', 'settings.css'), css);
+}
+
 async function loadNodeSide() {
   const { runnerImport } = await import('vite');
   const files = await runnerImport(path.join(APP_ROOT, 'vite/atlas-files.ts'));
@@ -145,6 +178,7 @@ async function main(argv) {
       publicDir: false,
       build: { outDir: out, emptyOutDir: true }
     });
+    await buildSettingsPage(out);
     if (!values['no-data']) {
       const { resolveRoots, publishData } = await loadNodeSide();
       publish(publishData, resolveRoots(), path.join(out, 'data'), keep);
