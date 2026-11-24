@@ -5,10 +5,11 @@ import { contributes, evidenceView, type EvidenceView, type SourceSelection } fr
 import type { SpecEntry } from '@crvouga/atlas/reports/explorer-types';
 import { combineEvidence, distinctHeaders } from '@crvouga/atlas/reports/layer-merge';
 import type { ReportOutline } from '@crvouga/atlas/reports/layer-types';
-import { SpecIndexSchema } from '@crvouga/atlas/schema';
+import { isStatechartFile, SpecIndexSchema } from '@crvouga/atlas/schema';
 import { useInfiniteQuery, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from 'react';
 
+import { useLocation } from '@tanstack/react-router';
 import { keys, specKey, useAdapter } from '../data/queries';
 import { eventsAddress, listenLive, useLiveStatus } from '../live/live-stream';
 import { liveInvalidator } from '../live/live-query';
@@ -29,6 +30,7 @@ const LIVE_SAFETY_POLL_MS = 60_000;
 const LIVE_REREAD_MS = 250;
 
 export type EvidenceState = {
+  readonly browsingTests?: boolean;
   /** The layer list has been read at least once. */
   readonly ready: boolean;
   /** Why recorded results cannot be read at all, when they cannot. */
@@ -94,7 +96,8 @@ function hasExclusions(excluded: SourceSelection): boolean {
  * Reads the evidence every page of the viewer shares. `deferEffective` holds back a server's effective report while the
  * page open reads what it needs from the server itself (the UI catalog through its index): what was already read stays.
  */
-export function EvidenceProvider({ children, deferEffective = false }: { children: ReactNode; deferEffective?: boolean }) {
+export function EvidenceProvider({ children, deferEffective = false, browseTests = false }: { children: ReactNode; deferEffective?: boolean; browseTests?: boolean }) {
+  const { search } = useLocation();
   const adapter = useAdapter();
   const source = specKey(adapter);
   const excluded = useUiStore((s) => s.excluded);
@@ -108,7 +111,7 @@ export function EvidenceProvider({ children, deferEffective = false }: { childre
     const url = eventsAddress();
     if (!url) return;
     // A burst of results (a CI run finishing, many shards at once) is read once, not once for each.
-    const reads = [liveInvalidator(client, ['evidence-effective'], LIVE_REREAD_MS), liveInvalidator(client, ['evidence-index'], LIVE_REREAD_MS)];
+    const reads = [liveInvalidator(client, ['test-pages'], LIVE_REREAD_MS), liveInvalidator(client, ['evidence-effective'], LIVE_REREAD_MS), liveInvalidator(client, ['evidence-index'], LIVE_REREAD_MS)];
     const outlines = [liveInvalidator(client, ['evidence-outline'], LIVE_REREAD_MS), liveInvalidator(client, ['spec', source], LIVE_REREAD_MS)];
     const reread = () => reads.forEach(refresh => refresh());
     const reoutline = () => { outlines.forEach(refresh => refresh()); reread(); };
@@ -131,6 +134,7 @@ export function EvidenceProvider({ children, deferEffective = false }: { childre
   // The node answers with only what the report shows, in one request. Leaving a source out needs the
   // history it hides, so that one case reads every layer, as a store without a node always does.
   const effective = effectiveEvidence() && !staticEvidence && !hasExclusions(excluded);
+  const browsingTests = effective && browseTests && (search.view === 'tests' || !files.some(isStatechartFile));
   const overview = useQuery({
     queryKey: ['evidence-effective'],
     // Holding a report, ask only for what changed since it; the server answers with all of it when it cannot.
@@ -140,7 +144,7 @@ export function EvidenceProvider({ children, deferEffective = false }: { childre
       if (!isEffectiveDelta(answer)) return answer;
       return (held && applyEffectiveDelta(held, answer)) ?? reportJson<EffectiveEvidence>('/evidence/effective', signal);
     },
-    enabled: effective && !deferEffective,
+    enabled: effective && !deferEffective && !browsingTests,
     staleTime: 0,
     refetchOnWindowFocus: 'always',
     refetchOnReconnect: 'always',
@@ -211,7 +215,8 @@ export function EvidenceProvider({ children, deferEffective = false }: { childre
   const effectiveHeaders = useMemo(() => (overview.data?.layers ?? NONE).map((entry) => entry.layer), [overview.data]);
 
   const state: EvidenceState = {
-    ready: effective ? overview.data !== undefined : pages !== undefined,
+    browsingTests,
+    ready: effective ? browsingTests || overview.data !== undefined : pages !== undefined,
     unavailable: effective ? (overview.data === undefined && overview.error ? overview.error.message : null) : pages === undefined && index.error ? index.error.message : null,
     retry: () => {
       if (effective) { void Promise.all([overview.refetch(), serverOutline.refetch()]); return; }

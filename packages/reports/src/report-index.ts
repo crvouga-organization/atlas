@@ -99,6 +99,7 @@ export class ReportIndex {
   #added: LayerHeader[] = [];
   #announced = '';
   #passes = 0;
+  #fullRequested = false;
   /** Layers handed over by an uploader, read one at a time in the order they came. */
   #accepting: Promise<void> = Promise.resolve();
   readonly #checkpointStore: ObjectStore | undefined;
@@ -133,12 +134,16 @@ export class ReportIndex {
 
   /**
    * A refresh that surely starts after this call: one already under way may have looked before whatever
-   * made the caller ask. Used when something was just written.
+   * made the caller ask. Pass true to list the entire catalog and flush its checkpoint during scheduled maintenance.
    */
-  async refreshNow(): Promise<boolean> {
+  async refreshNow(full = false): Promise<boolean> {
     const running = this.#refreshing;
     const earlier = running ? await running.catch(() => false) : false;
-    return (await this.refresh()) || earlier;
+    if (full) this.#fullRequested = true;
+    const changed = await this.refresh();
+    if (full && this.#fullRequested) return this.refreshNow(true);
+    if (full) await this.#writer?.flush(true);
+    return changed || earlier;
   }
 
   /**
@@ -226,7 +231,8 @@ export class ReportIndex {
   async #refresh(): Promise<boolean> {
     const before = this.#rev;
     // The whole catalog on the first pass and now and then; otherwise only its newest end, where new layers sort.
-    const full = this.#passes++ % this.#fullListEvery === 0;
+    const full = this.#passes++ % this.#fullListEvery === 0 || this.#fullRequested;
+    this.#fullRequested = false;
     // Each backend is listed and read on its own, so a slow or unreachable one never holds back the layers of the others: the
     // report fills in as each answers. Oldest first or newest first gives the same report; newest first shows recent work soonest.
     await Promise.all(this.#backends.map(async backend => {
@@ -446,6 +452,25 @@ export class ReportIndex {
    */
   superseded(): ReadonlySet<string> {
     return this.#superseded;
+  }
+
+  /** Drop history and counts for live layers confirmed superseded and compacted in this single backend. */
+  async forgetLiveProgress(runId: string, ids: ReadonlySet<string>): Promise<void> {
+    if (!ids.size || this.#backends.length !== 1) return;
+    const backend = this.#backends[0]!;
+    await this.#history.forgetProgress(runId, ids, async id => {
+      const held = this.#held.get(id);
+      if (held) return held.evidence;
+      const layer = await readLayer(backend.store, id);
+      if (!layer) throw new Error('A retained live layer could not be read.');
+      return layerEvidence(layerSummary(layer), backend.id);
+    });
+    for (const id of ids) {
+      this.#superseded.delete(id);
+      this.#attribution.delete(id);
+    }
+    this.#rev++;
+    this.#emit();
   }
 
   /** For `/readyz` and logs. */

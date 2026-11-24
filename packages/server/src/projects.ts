@@ -23,7 +23,8 @@ const scopeStore = (store: ObjectStore, slug: string) => typeof (store as Partia
 
 /** Wrap the single-project protocol in project selection. Auth, upload validation and composition stay identical. */
 export function projectServer(options: AtlasServerOptions, create: (options: AtlasServerOptions) => AtlasServer): AtlasServer {
-  const base = create(options);
+  const projectOptions = { ...options, pollProjects: () => discover() };
+  const base: AtlasServer = create(projectOptions);
   const auth = createAuth(options.tokens ?? [], options.anonymousRead ?? false, options.trust);
   const write = options.backends.find(backend => backend.id === options.write)!.store;
   const registry = options.liveStore ?? write;
@@ -59,14 +60,14 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
       child.server.close(); children.delete(slug);
     }
   };
-  const timer = setInterval(expire, 60_000); timer.unref?.();
+  const timer = options.refreshOnRequestMs === undefined ? setInterval(expire, 60_000) : null; timer?.unref?.();
   /** The application of one named project, created on first use over a store scoped to it. `null` when too many are active. */
   const ensureChild = (slug: string) => {
     let child = children.get(slug);
     if (child) return child;
     expire();
     if (children.size >= 64) return null;
-    child = { touched: Date.now(), pending: 0, server: create({ ...options,
+    child = { touched: Date.now(), pending: 0, server: create({ ...projectOptions,
       ...(options.log ? { log: line => options.log!({ ...line, project: slug }) } : {}),
       backends: options.backends.map(backend => ({ ...backend, store: scopeStore(backend.store, slug) })),
       ...(options.liveStore ? { liveStore: scopeStore(options.liveStore, slug) } : {}), site: undefined, settings: undefined, gc: undefined
@@ -102,7 +103,7 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
     return work;
   };
   let lastCollectedAt = 0;
-  const gcTimer = options.gc ? setInterval(() => {
+  const gcTimer = options.gc && options.refreshOnRequestMs === undefined ? setInterval(() => {
     void (async () => {
       if (closed) return;
       // A pass left running (by a restart, or a step that ran out of time) is carried on before any new one starts.
@@ -125,9 +126,21 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
     : Response.json({ ...pass, policy }, { headers: { 'cache-control': 'no-store' } });
 
   /** One scheduled pass: what the timers above do, for a host where nothing runs between requests. */
-  async function maintain(): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string; readonly pass?: GcPass | null }> {
+  async function maintain(task: 'maintain' | 'gc' | 'all' = 'all'): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string; readonly pass?: GcPass | null }> {
     await base.ready;
-    await Promise.allSettled([base.index.refresh(), discover()]);
+    await discover();
+    if (task !== 'gc') {
+      await base.sweep?.();
+      for (const slug of known) {
+        if (slug === 'default') continue;
+        const child = ensureChild(slug);
+        if (!child) throw new Error('Project capacity reached during maintenance.');
+        child.pending++;
+        try { await child.server.ready; await child.server.sweep?.(); }
+        finally { child.pending--; }
+      }
+    }
+    if (task === 'maintain') return { gc: null, note: 'Project maintenance finished.' };
     if (!options.gc) return { gc: null, note: 'Garbage collection is managed by the embedding application.' };
     const current = await passes.current();
     if (current) {
@@ -137,7 +150,7 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
         : { gc: pass.runs, note: 'Garbage collection finished.', pass };
     }
     const policy = await options.gc.policy();
-    if (!policy?.enabled) return { gc: null, note: policy ? 'The saved garbage collection policy is disabled.' : 'No garbage collection policy has been saved: nothing is deleted.' };
+    if (!policy?.enabled) return { gc: null, note: policy ? 'The garbage collection policy is disabled.' : 'No garbage collection policy has been saved: nothing is deleted.' };
     const last = await readUtf8(registry, GC_LAST).then(text => Number((text ? JSON.parse(text) : {}).at) || 0, () => 0);
     if (clock() - last < policy.intervalHours * 3_600_000) return { gc: null, note: `Garbage collection ran ${new Date(last).toISOString()}; the next pass is due after ${policy.intervalHours} h.` };
     await writeUtf8(registry, GC_LAST, JSON.stringify({ at: clock() }), 'application/json');
@@ -164,7 +177,7 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
           const policy = await options.gc.policy();
           if (!policy) return problemResponse(409, 'No garbage collection policy has been saved yet, so nothing is deleted. Save one first.');
           const dryRun = ['1', 'true'].includes(url.searchParams.get('dryRun') ?? '');
-          if (!dryRun && !policy.enabled) return problemResponse(409, 'The saved garbage collection policy is disabled. Enable it, or use dryRun to preview.');
+          if (!dryRun && !policy.enabled) return problemResponse(409, 'The garbage collection policy is disabled. Enable it, or use dryRun to preview.');
           // One pass at a time: a request while one runs is answered with that one (and, where requests are bounded, carries it on).
           const pass = await passes.start(dryRun ? { ...policy, enabled: true } : policy, { dryRun });
           if (budget !== undefined) return passResponse(await carryOn(pass.id), policy);
@@ -249,6 +262,6 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
         return problemResponse(503, 'The project backend is unavailable. Retry later.');
       }
     },
-    close() { closed = true; clearInterval(timer); if (gcTimer) clearInterval(gcTimer); base.close(); for (const child of children.values()) child.server.close(); children.clear(); }
+    close() { closed = true; if (timer) clearInterval(timer); if (gcTimer) clearInterval(gcTimer); base.close(); for (const child of children.values()) child.server.close(); children.clear(); }
   };
 }

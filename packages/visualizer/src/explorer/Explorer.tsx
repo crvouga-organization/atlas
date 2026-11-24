@@ -69,7 +69,7 @@ import {
   type TestSummary
 } from '@crvouga/atlas/reports/test-catalog';
 import { Link } from '@tanstack/react-router';
-import { useDeferredValue, useEffect, useId, useMemo, useState, type ReactNode } from 'react';
+import { useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Metric, PageHeader, Panel } from '../components/Page';
 import { attentionRank, hasRelease, needsAttention, type Assessment, type ReleaseIdentity } from '../evidence/applicability';
 import { ApplicabilityControls, VerdictBadge } from '../evidence/applicability-view';
@@ -252,7 +252,7 @@ export function Explorer() {
   }, [evidence.view]);
   const model = catalog.model;
   const selected = search.test ? (model?.byKey.get(search.test) ?? null) : null;
-  const empty = model !== null && model.tests.length === 0;
+  const empty = model !== null && model.summary.tests === 0;
   // The opened result's place in the list as it is filtered and ordered now: the carousel steps through that list.
   const order = listing?.shown ?? [];
   const position = selected ? order.findIndex((test) => test.key === selected.key) : -1;
@@ -275,7 +275,7 @@ export function Explorer() {
                   value="tests"
                   rightSection={
                     <Text span size="xs" c="dimmed">
-                      {model.tests.length}
+                      {model.summary.tests}
                     </Text>
                   }
                 >
@@ -353,9 +353,9 @@ export function Explorer() {
             <CollectionsView />
           ) : empty ? null : (
             <>
-              <InsightStrip model={model} scope={listing.scope} search={search} />
+              {catalog.page && model.summary.tests > catalog.page.limit ? <Group><Text>{plural(model.summary.tests, 'test', 'tests')} · {model.summary.counts.failed} failed</Text><Button variant="subtle" onClick={catalog.page.loadFull}>View insights</Button></Group> : <InsightStrip model={model} scope={listing.scope} search={search} />}
               <TestsPanel model={model} search={search} listing={listing} onSearch={(value) => go({ q: value || undefined }, { replace: true })} />
-              <MoreInsights scope={listing.scope} />
+              {(!catalog.page || model.summary.tests <= catalog.page.limit) && <MoreInsights scope={listing.scope} />}
             </>
           ))}
         {kinds.length > 0 && !search.tab && (
@@ -715,6 +715,31 @@ function TestsPanel({
   onSearch: (value: string) => void;
 }) {
   const go = useExplorerNavigate();
+  const { page } = useTestCatalog();
+  const nextPage = useRef<HTMLButtonElement>(null);
+  const pageStart = useRef<HTMLDivElement>(null);
+  const previousOffset = useRef(page?.offset);
+  useEffect(() => {
+    if (page && previousOffset.current !== page.offset && page.offset) pageStart.current?.scrollIntoView?.({ block: 'start' });
+    previousOffset.current = page?.offset;
+  }, [page?.offset]);
+  useEffect(() => {
+    const button = nextPage.current;
+    if (!page || !button || button.disabled || typeof IntersectionObserver === 'undefined') return;
+    // Arm after scrolling so a short first page or window resize cannot skip results.
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) {
+        observer.disconnect();
+        button.click();
+      }
+    });
+    const arm = () => observer.observe(button);
+    window.addEventListener('scroll', arm, { capture: true, once: true, passive: true });
+    return () => {
+      window.removeEventListener('scroll', arm, true);
+      observer.disconnect();
+    };
+  }, [page?.offset, page?.total, page?.limit]);
   const searchId = useId();
   // Best match is the order of a search with words; without words the list is in spec order.
   const defaultSort: ExplorerSort = listing.hits ? 'relevance' : 'spec';
@@ -725,7 +750,7 @@ function TestsPanel({
   const statuses = values(search.status);
   const envs = values(search.env);
   const statusCount = (id: string) =>
-    id === ''
+    page?.counts ? page.counts.status[id] ?? 0 : id === ''
       ? listing.byEnvironment.length
       : listing.byEnvironment.filter((test) => (id === 'flaky' ? test.stats.flaky : test.status === id)).length;
   const envCounts = useMemo(() => {
@@ -760,7 +785,7 @@ function TestsPanel({
             <Title order={2}>Tests</Title>
             <Group gap={6} wrap="nowrap">
               <Text role="status" c="dimmed">
-                {listing.shown.length === model.tests.length
+                {page ? `${(page.total).toLocaleString()} of ${plural(model.summary.tests, 'test', 'tests')}` : listing.shown.length === model.tests.length
                   ? plural(model.tests.length, 'test', 'tests')
                   : `${listing.shown.length.toLocaleString()} of ${plural(model.tests.length, 'test', 'tests')}`}
               </Text>
@@ -838,7 +863,7 @@ function TestsPanel({
               type="button"
               size="compact-sm"
               aria-pressed={hasVideo}
-              aria-label={`Has video ${plural(listing.withVideo, 'test', 'tests')}`}
+              aria-label={`Has video ${plural(page?.counts?.video ?? listing.withVideo, 'test', 'tests')}`}
               onClick={() => {
                 if (listing.parsed.filters.video) {
                   const token = listing.parsed.tokens.find((item) => item.key === 'video')!;
@@ -849,7 +874,7 @@ function TestsPanel({
               }}
               variant={hasVideo ? 'light' : 'subtle'}
               leftSection={<IconVideo size={14} aria-hidden="true" />}
-              rightSection={<Text span size="xs" c="dimmed">{listing.withVideo.toLocaleString()}</Text>}
+              rightSection={<Text span size="xs" c="dimmed">{(page?.counts?.video ?? listing.withVideo).toLocaleString()}</Text>}
             >
               Has video{' '}
             </Button>
@@ -871,7 +896,7 @@ function TestsPanel({
                       aria-pressed={envs.includes(value)}
                       onClick={() => go({ env: toggled(search.env, value) })}
                       variant={envs.includes(value) ? 'filled' : 'subtle'}
-                      rightSection={<Text span size="xs" inherit opacity={0.65}>{(envCounts.get(value) ?? 0).toLocaleString()}</Text>}
+                      rightSection={<Text span size="xs" inherit opacity={0.65}>{(page?.counts?.environment[value] ?? envCounts.get(value) ?? 0).toLocaleString()}</Text>}
                     >
                       {environmentLabel(value)}{' '}
                     </Button>
@@ -1015,7 +1040,15 @@ function TestsPanel({
         )}
       </Stack>
       <Divider />
-      <TestList layout={search.layout ?? 'grid'} tests={listing.shown} search={search} total={model.tests.length} hits={listing.hits} sort={search.sort ?? (listing.hits ? 'relevance' : 'spec')} assessments={listing.assessments} release={listing.release} onClear={clear} />
+      <div ref={pageStart} />
+      <TestList layout={search.layout ?? 'grid'} tests={listing.shown} search={search} total={model.summary.tests} hits={listing.hits} sort={search.sort ?? (listing.hits ? 'relevance' : 'spec')} assessments={listing.assessments} release={listing.release} onClear={clear} />
+      {page && page.total > page.limit && (
+        <Group px="lg">
+          <Button variant="subtle" disabled={!page.offset} onClick={() => page.go(Math.max(0, page.offset - page.limit))}>Previous page</Button>
+          <Text>{page.offset + 1}–{Math.min(page.offset + page.limit, page.total)} of {page.total}</Text>
+          <Button ref={nextPage} variant="subtle" disabled={page.offset + page.limit >= page.total} onClick={() => page.go(page.offset + page.limit)}>Next page</Button>
+        </Group>
+      )}
     </Card>
   );
 }
@@ -1162,7 +1195,8 @@ function TestGroupSection({
   onToggle: () => void;
 }) {
   // A flat grid shows a few screens of cards; a flat list a hundred rows; a group fifty.
-  const page = by !== 'none' ? GROUP_ROWS : layout === 'grid' ? 48 : 100;
+  const paged = useTestCatalog().page;
+  const page = paged ? paged.limit : by !== 'none' ? GROUP_ROWS : layout === 'grid' ? 48 : 100;
   const [shown, setShown] = useState(page);
   const now = useNow();
   const items = group.tests.slice(0, shown).map((test) => (

@@ -41,6 +41,7 @@ export type ResolvedServerConfig = Omit<ServerConfig, 'auth'> & {
   readonly anonymousRead: boolean;
   readonly insecure: boolean;
   /** Where the config came from, for the first line of the log. */
+  readonly gcSource?: 'env' | 'config';
   readonly configFile: string | null;
   /** Where this server was built from (`ATLAS_REVISION`, `ATLAS_BUILD_TIME`, `ATLAS_IMAGE_DIGEST` and the installed version), for `GET /api/server`. */
   readonly build: BuildInfo;
@@ -88,6 +89,12 @@ export type ServerSetting = {
  * table; one documented here that the loader ignores fails the test.
  */
 export const SERVER_SETTINGS: readonly ServerSetting[] = [
+  { summary: 'Project storage budget', key: 'gc.maxBytes', flag: null, env: ['ATLAS_GC_MAX_BYTES'], default: 'unlimited', example: { value: '10GB', read: c => c.gc?.maxBytes, expected: '10GB' } },
+  { summary: 'Age for expiring superseded attachments', key: 'gc.attachments.maxAgeDays', flag: null, env: ['ATLAS_GC_ATTACHMENTS_MAX_AGE_DAYS'], default: 'layer age', example: { value: '3', read: c => c.gc?.attachments?.maxAgeDays, expected: 3 } },
+  { summary: 'Deployment retention: enabled', key: 'gc.enabled', flag: null, env: ['ATLAS_GC_ENABLED'], default: 'saved policy', example: { value: 'true', read: c => c.gc?.enabled, expected: true } },
+  { summary: 'Deployment retention: maxAgeDays', key: 'gc.maxAgeDays', flag: null, env: ['ATLAS_GC_MAX_AGE_DAYS'], default: 'saved policy', example: { value: '3', read: c => c.gc?.maxAgeDays, expected: 3 } },
+  { summary: 'Deployment retention: keepLatest', key: 'gc.keepLatest', flag: null, env: ['ATLAS_GC_KEEP_LATEST'], default: 'saved policy', example: { value: '7', read: c => c.gc?.keepLatest, expected: 7 } },
+  { summary: 'Deployment retention: intervalHours', key: 'gc.intervalHours', flag: null, env: ['ATLAS_GC_INTERVAL_HOURS'], default: 'saved policy', example: { value: '6', read: c => c.gc?.intervalHours, expected: 6 } },
   // Storage is required and comes only from the environment: reports and user state live in S3 and nowhere else.
   ...(Object.entries({
     ATLAS_S3_ENDPOINT: ['endpoint', 'S3 endpoint URL', c => c.s3?.endpoint, 'https://s3.example.com'],
@@ -106,6 +113,7 @@ export const SERVER_SETTINGS: readonly ServerSetting[] = [
   { summary: 'Which storage keeps everything: `s3` or `vercel-blob` (a private Blob store, with `BLOB_READ_WRITE_TOKEN` and optionally `ATLAS_BLOB_PREFIX`)', key: 'storage.kind', flag: null, env: ['ATLAS_STORAGE'], default: '`vercel-blob` when `BLOB_READ_WRITE_TOKEN` is the only storage set, else `s3`', example: { value: 's3', read: c => c.storage.kind, expected: 's3' } },
   { summary: 'CI repositories that may publish without a token, by OIDC identity: `github:<owner>`, `github:<owner>/<repo>` or `github:<owner>/<repo>@<ref>` (comma-separated; `none` for nobody)', key: 'auth.trustedPublishers', flag: null, env: ['ATLAS_TRUSTED_PUBLISHERS'], default: 'the GitHub owner the server was deployed from on Vercel or Railway, else nobody', example: { value: 'github:acme,github:other/web@refs/heads/main', read: c => c.trustedPublishers.map(describeRule), expected: ['github:acme', 'github:other/web@refs/heads/main'] } },
   { summary: 'The URLs this server is published at (comma-separated); a CI identity token must be addressed to one. Set it when callers reach the server without a platform router in front', key: 'publicUrls', flag: null, env: ['ATLAS_PUBLIC_URL'], default: 'the host each request arrived on', example: { value: 'https://atlas.example.com', read: c => c.publicUrls, expected: ['https://atlas.example.com'] } },
+  { summary: 'Enable server-sent events', key: 'events', flag: null, env: ['ATLAS_EVENTS'], default: 'on', example: { value: 'off', read: c => c.events, expected: 'off' } },
   { summary: 'Address to listen on', key: 'host', flag: '--host <address>', env: ['ATLAS_HOST', 'HOST'], default: '`127.0.0.1`', example: { value: '0.0.0.0', read: c => c.host, expected: '0.0.0.0' } },
   { summary: 'Port (`0` picks a free one)', key: 'port', flag: '--port <n>', env: ['ATLAS_PORT', 'PORT'], default: '`8080`', example: { value: '9191', read: c => c.port, expected: 9191 } },
   { summary: 'The built client', key: 'site', flag: '--site <dir>', env: ['ATLAS_SITE'], default: '`./atlas-site`, else built once', example: { value: 'client', read: c => path.basename(c.site ?? ''), expected: 'client' } },
@@ -195,6 +203,7 @@ export function loadServerConfig(argv: readonly string[], env: Env, cwd: string,
   set('host', flags.host ?? env.ATLAS_HOST ?? env.HOST);
   const port = env.ATLAS_PORT ?? env.PORT;
   set('port', flags.port !== undefined ? Number(flags.port) : port !== undefined ? Number(port) : undefined);
+  set('events', env.ATLAS_EVENTS);
   set('site', flags.site ?? env.ATLAS_SITE);
   set('outlineBranch', flags['outline-branch'] ?? env.ATLAS_OUTLINE_BRANCH);
   set('refreshSeconds', flags.refresh !== undefined ? Number(flags.refresh) : env.ATLAS_REFRESH_SECONDS !== undefined ? Number(env.ATLAS_REFRESH_SECONDS) : undefined);
@@ -208,6 +217,22 @@ export function loadServerConfig(argv: readonly string[], env: Env, cwd: string,
     if (env[variable] !== undefined) limits[key] = Number(env[variable]);
   }
   merged.limits = limits;
+  const gcEnv: Record<string, unknown> = Object.fromEntries(Object.entries({
+    maxAgeDays: env.ATLAS_GC_MAX_AGE_DAYS, keepLatest: env.ATLAS_GC_KEEP_LATEST, intervalHours: env.ATLAS_GC_INTERVAL_HOURS
+  }).filter(([, value]) => value !== undefined).map(([key, value]) => [key, value?.trim() ? Number(value) : NaN]));
+  if (env.ATLAS_GC_ENABLED !== undefined) {
+    if (!['0', '1', 'true', 'false'].includes(env.ATLAS_GC_ENABLED)) throw new ConfigError('ATLAS_GC_ENABLED must be true, false, 1 or 0');
+    gcEnv.enabled = truthy(env.ATLAS_GC_ENABLED);
+  }
+  if (env.ATLAS_GC_MAX_BYTES !== undefined) gcEnv.maxBytes = /^\d+$/.test(env.ATLAS_GC_MAX_BYTES) ? Number(env.ATLAS_GC_MAX_BYTES) : env.ATLAS_GC_MAX_BYTES;
+  if (env.ATLAS_GC_ATTACHMENTS_MAX_AGE_DAYS !== undefined) {
+    gcEnv.attachments = { ...(raw.gc as { attachments?: object } | null)?.attachments, maxAgeDays: env.ATLAS_GC_ATTACHMENTS_MAX_AGE_DAYS.trim() ? Number(env.ATLAS_GC_ATTACHMENTS_MAX_AGE_DAYS) : NaN };
+  }
+  const gcFromEnv = Object.keys(gcEnv).length > 0;
+  if (gcFromEnv) {
+    if (raw.gc !== undefined && (!raw.gc || typeof raw.gc !== 'object' || Array.isArray(raw.gc))) throw new ConfigError('gc must be a policy object');
+    merged.gc = { enabled: true, maxAgeDays: 14, ...raw.gc as object, ...gcEnv };
+  }
   const roots = list(env.ATLAS_CATALOG_ROOTS);
   if (roots.length) merged.catalog = { ...(raw.catalog as Record<string, unknown> | undefined), roots };
   if (flags.insecure || truthy(env.ATLAS_INSECURE)) auth.insecure = true;
@@ -243,7 +268,7 @@ export function loadServerConfig(argv: readonly string[], env: Env, cwd: string,
   for (const url of publicUrls) if (!/^https?:\/\/[^/?#]+\/?$/.test(url)) throw new ConfigError(`ATLAS_PUBLIC_URL "${url}" must be an origin, like https://atlas.example.com`);
 
   const { auth: _auth, ...rest } = config;
-  const resolved: ResolvedServerConfig = { ...rest, storage, ...(storage.kind === 's3' ? { s3: storage.s3 } : {}), trustedPublishers: trusted.rules, trustedPublishersSource: trusted.source, publicUrls, tokens, anonymousRead: config.auth.anonymousRead, insecure: config.auth.insecure, configFile: file, build: buildInfo(env), ...(config.site ? { site: path.resolve(base, config.site) } : {}) };
+  const resolved: ResolvedServerConfig = { ...rest, ...(config.gc ? { gcSource: gcFromEnv ? 'env' as const : 'config' as const } : {}), storage, ...(storage.kind === 's3' ? { s3: storage.s3 } : {}), trustedPublishers: trusted.rules, trustedPublishersSource: trusted.source, publicUrls, tokens, anonymousRead: config.auth.anonymousRead, insecure: config.auth.insecure, configFile: file, build: buildInfo(env), ...(config.site ? { site: path.resolve(base, config.site) } : {}) };
   assertSafeToListen(resolved);
   return resolved;
 }

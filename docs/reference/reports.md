@@ -633,6 +633,46 @@ const redirect = await storeRedirect(request, store, `layers/runs/${id}/clip.web
 if (redirect) return redirect;
 ```
 
+### attachment-retention.ts
+
+Source: `packages/reports/src/attachment-retention.ts`. Import: `@crvouga/atlas/reports/attachment-retention`
+
+@module Attachment retention
+Expiry receipts identify captured files in a superseded layer while preserving its content-addressed manifest.
+Bundle chunks can hold several files. A chunk is reclaimable only after every retained layer and file releases it.
+
+#### `expiryPrefix`
+
+```ts
+export const expiryPrefix = …
+```
+
+Private object keys for a layer’s expired attachment receipts.
+
+#### `expiredFiles`
+
+```ts
+export async function expiredFiles(store: ObjectStore, id: string): Promise<string[]>
+```
+
+Bundle keys already marked expired. An unreadable receipt listing fails the read.
+
+#### `expirableFiles`
+
+```ts
+export function expirableFiles(layer: ReportLayer, policy: NonNullable<GcPolicy['attachments']>, nowMs: number, defaultBranch?: string): string[]
+```
+
+Which content-addressed attachment files may expire under the policy. Any protected reference keeps the file.
+
+#### `withoutExpiredFiles`
+
+```ts
+export function withoutExpiredFiles(layer: ReportLayer, keys: readonly string[]): ReportLayer
+```
+
+A presentation copy with expired files replaced by a note at the same check, step, attempt, part or layer.
+
 ### AWS credential lookup
 
 Source: `packages/reports/src/aws-credentials.ts`. Import: `@crvouga/atlas/reports/aws-credentials`
@@ -3719,6 +3759,8 @@ export type GcPlan = {
   readonly kept: number;
   /** The ids of the layers that stay, when `planGarbage` made the plan: what a pass reads to keep the blobs they use. */
   readonly remaining?: readonly string[];
+  /** Retained superseded layers to inspect for earlier evidence expiry. */
+  readonly expiry?: { readonly ids: readonly string[]; readonly defaultBranch?: string; readonly policy: NonNullable<GcPolicy['attachments']>; readonly nowMs: number };
 };
 ```
 
@@ -3727,7 +3769,7 @@ What a policy would delete from a store right now.
 #### `GcOutcome`
 
 ```ts
-export type GcOutcome = { readonly deletedLayers: number; readonly deletedBlobs: number; readonly candidateBlobs?: number; readonly candidateBytes?: number; readonly deletedBytes?: number };
+export type GcOutcome = { readonly strippedLayers?: number; readonly deletedLayers: number; readonly deletedBlobs: number; readonly candidateBlobs?: number; readonly candidateBytes?: number; readonly deletedBytes?: number };
 ```
 
 The outcome of applying a plan. `candidateBlobs` and `candidateBytes` are what the pass found to delete (the blobs only
@@ -3737,12 +3779,12 @@ real one; `deletedBytes` is what a real pass removed (0 for a dry run).
 #### `planGarbage`
 
 ```ts
-export async function planGarbage(store: ObjectStore, input: { readonly policy: GcPolicy; readonly nowMs: number; readonly eligible: ReadonlySet<string> }): Promise<GcPlan>
+export async function planGarbage(store: ObjectStore, input: { readonly defaultBranch?: string; readonly policy: GcPolicy; readonly nowMs: number; readonly eligible: ReadonlySet<string> }): Promise<GcPlan>
 ```
 
 Decides which layers a policy deletes, without deleting anything. `eligible` is the set of layer ids the caller has
 read and knows no longer decide any result (`ReportIndex.superseded()`); a layer not in it is never a candidate.
-Lists the catalog only. With `policy.enabled === false` the plan is empty.
+A byte budget also measures stored objects and references. With `policy.enabled === false` the plan is empty.
 
 **Example**
 
@@ -5603,7 +5645,7 @@ Transport and batching configuration. Defaults: 250 ms batches, 5 s heartbeats a
 #### `LiveReporter`
 
 ```ts
-export type LiveReporter = { readonly id: string; readonly finishedAtMs?: number; check(check: LiveCheck): void; flush(): Promise<void>; finish(status?: 'completed' | 'interrupted', reason?: string): Promise<void> };
+export type LiveReporter = { readonly id: string; compact?(layer: string, additional?: readonly string[]): Promise<void>; readonly finishedAtMs?: number; check(check: LiveCheck): void; flush(): Promise<void>; finish(status?: 'completed' | 'interrupted', reason?: string): Promise<void> };
 ```
 
 Producer handle. check never throws transport errors into a test; finish flushes and rejects if publication failed.
@@ -5826,6 +5868,8 @@ See docs/report-contract.md#backends
 
 ```ts
 export interface StoredObject {
+  /** Opaque version for a store that supports conditional writes. */
+  readonly etag?: string;
   /** Stream of stored bytes. Single-use; consume or discard before issuing more I/O on the same store. */
   readonly body: ReadableStream<Uint8Array>;
   /** The media type the object was written with. */
@@ -5919,6 +5963,48 @@ export function canSign(store: ObjectStore): store is ObjectStore & SignedDownlo
 ```
 
 Whether a store can hand out short-lived download URLs (`SignedDownloads`).
+
+#### `StagedUploads`
+
+```ts
+export interface StagedUploads {
+  /** Sign a short-lived PUT to one staging key, binding its content length and type. */
+  stagedUploadTarget(key: string, upload: { size: number; contentType: string }): Promise<{
+    method: 'PUT'; url: string; headers: Record<string, string>; expiresAt: string;
+  }>;
+  /** Write only when the destination does not exist. Returns false when another writer already created it. */
+  putIfAbsent(key: string, bytes: Uint8Array, contentType: string): Promise<boolean>;
+}
+```
+
+Optional store support for sending bytes to a private staging key and atomically creating the validated destination.
+
+#### `canStage`
+
+```ts
+export function canStage(store: ObjectStore): store is ObjectStore & StagedUploads
+```
+
+Whether the store supports private staging and atomic promotion of verified bytes.
+
+#### `ConditionalWrites`
+
+```ts
+export interface ConditionalWrites {
+  /** Returns false when the current version differs from the one read by the caller. */
+  putConditional(key: string, bytes: Uint8Array, contentType: string, expected: string | null): Promise<boolean>;
+}
+```
+
+Optional atomic mutation for shared server state. A null expected tag creates only an absent key.
+
+#### `canWriteConditionally`
+
+```ts
+export function canWriteConditionally(store: ObjectStore): store is ObjectStore & ConditionalWrites
+```
+
+Whether the store implements atomic writes against an observed version.
 
 ### Consumer package-manager commands
 
@@ -6381,6 +6467,16 @@ namespaced `extensions`. All of it is optional (docs/extending.md).
 Nothing here reads a clock: `recordedAtMs` is when the checks ran, given by the caller. Publishing
 the same input twice therefore writes the same layer, and a retried CI step changes nothing.
 Each check's `id` is its identity across runs. It must be stable and unique within the layer.
+
+#### `publishCheckLayers`
+
+```ts
+export async function publishCheckLayers(store: ObjectStore, input: PublishChecksInput): Promise<ReportLayer[]>
+```
+
+Publish all checks, splitting a rejected oversized manifest at check boundaries. Attachment chunks are written once.
+Every successful piece is immutable and retrying the same input reuses the same layer IDs.
+A single check that cannot fit, or any other upload error, rejects the publication.
 
 ### Publishing commit-keyed recordings
 
@@ -7684,7 +7780,7 @@ memory proportional to the number of checks and not to how long the project has 
 It reads only immutable layers (`layers/index/…`), which is what makes "read once" correct.
 
 - `refresh(): Promise<boolean>` — Read what is new in every backend and fold it in. Resolves true when the report changed. Calls overlap safely.
-- `async refreshNow(): Promise<boolean>` — A refresh that surely starts after this call: one already under way may have looked before whatever made the caller ask. Used when something was just written.
+- `async refreshNow(full = false): Promise<boolean>` — A refresh that surely starts after this call: one already under way may have looked before whatever made the caller ask. Pass true to list the entire catalog and flush its checkpoint during scheduled maintenance.
 - `accept(backendId: string, indexKey: string, known?: ReportLayer): Promise<void>` — Take in a layer an uploader has just written, from its catalog entry, without listing anything. Entries are read one after another; one already known is ignored. The regular refresh still reconciles the rest.
 - `onChange(listener: (change: IndexChange) => void): () => void` — Be told when the report changes. Returns how to stop.
 - `async start(intervalMs: number): Promise<void>` — Keep refreshing in the background. The first call returns once the first pass has finished.
@@ -7697,6 +7793,7 @@ It reads only immutable layers (`layers/index/…`), which is what makes "read o
 - `changedSince(since: string): ReadonlySet<string> | null` — The ids of the layers that were added or changed (took a slot, or lost one) since the report a reader holds, named by its version: what `delta` sends, without the text. `null` when that version is not remembered, and the reader should take everything. Used to answer "what changed" about a view of the report, such as the entries of the UI catalog.
 - `get history(): TestHistory { return this.#history; }` — Every recorded result of every test and every run, as layers were folded in: what the test catalog, a test's history and the run list are built from. Read-only for callers; `history.rev` changes whenever a layer is taken in.
 - `superseded(): ReadonlySet<string>` — The ids of layers this index has read and that no longer decide any result. Removing one from its store cannot change the report (every slot it filled is held by a newer layer), which is what makes it safe for garbage collection to delete. A layer that failed to load, is hidden by `include`, or still holds a result is not here.
+- `async forgetLiveProgress(runId: string, ids: ReadonlySet<string>): Promise<void>` — Drop history and counts for live layers confirmed superseded and compacted in this single backend.
 - `stats()` — For `/readyz` and logs.
 
 ### Test loading state
@@ -9468,7 +9565,7 @@ permission); `status` and `code` are what the service answered, `null` when it w
 #### `S3Store`
 
 ```ts
-export type S3Store = ObjectStore & PagedListing & SignedDownloads & {
+export type S3Store = ObjectStore & ConditionalWrites & PagedListing & SignedDownloads & StagedUploads & {
   /** A description with no secrets: `s3://bucket/prefix (us-east-1)`. */
   readonly label: string;
   /** Where the credentials came from, once a request has been made. */
@@ -9652,11 +9749,11 @@ anything and does not read the body; `payloadHash` is trusted.
 #### `presignUrl`
 
 ```ts
-export async function presignUrl(input: { readonly url: URL; readonly credentials: Credentials; readonly region: string; readonly service: string; readonly at: Date; readonly expiresSeconds: number }): Promise<string>
+export async function presignUrl(input: { readonly url: URL; readonly credentials: Credentials; readonly region: string; readonly service: string; readonly at: Date; readonly expiresSeconds: number; readonly upload?: { size: number; contentType: string } }): Promise<string>
 ```
 
-A query-signed URL anyone can GET until it expires, without credentials: for handing a file to a browser. Valid for
-`expiresSeconds` from `at`; signs only the `host` header and an unsigned payload, so it works for `GET` only.
+A query-signed URL for one key. By default it signs a GET for a browser. A staging PUT binds its upload headers. Valid for
+`expiresSeconds` from `at`.
 
 ### Snapshot bundles
 
@@ -10249,6 +10346,29 @@ The worst outcome of a set of tests or sources: `failed` if any failed, `skipped
 were skipped, otherwise `passed`. An empty list is `passed`: callers that need "no evidence" to mean something else
 (for example `closeCommit`) check for emptiness themselves.
 
+### storage-usage.ts
+
+Source: `packages/reports/src/storage-usage.ts`. Import: `@crvouga/atlas/reports/storage-usage`
+
+@module Project storage usage
+Counts physical objects and bytes in one project. Shared blobs count once in the total and once in each group that uses them.
+
+#### `projectObjectSizes`
+
+```ts
+export async function projectObjectSizes(store: ObjectStore): Promise<Map<string, number>>
+```
+
+Physical sizes of objects in one project, excluding child projects and the collector’s temporary work.
+
+#### `projectStorage`
+
+```ts
+export async function projectStorage(store: ObjectStore)
+```
+
+Measure project storage and attribute layer documents and captured files by producer, branch and attachment role.
+
 ### Prefix-scoped object store
 
 Source: `packages/reports/src/store-prefix.ts`. Import: `@crvouga/atlas/reports/store-prefix`
@@ -10279,6 +10399,9 @@ Keys passed to `get`, `put`, `head`, `delete`, `deleteMany`, `getUri` are checke
 empty, no leading `/`, no `..`) and throw otherwise. The `prefix` argument of `listKeys` and `listPage` is not
 checked here; the store underneath is responsible for it. Returned keys have the prefix removed.
 
+- `putConditional?: ConditionalWrites['putConditional'];` — Compare and write within this prefix when the underlying store supports it.
+- `stagedUploadTarget?: StagedUploads['stagedUploadTarget'];` — Signed staging under this project prefix when supported by the underlying store.
+- `putIfAbsent?: StagedUploads['putIfAbsent'];` — Atomically create a validated destination under this project prefix.
 - `get(key: string): Promise<StoredObject | null>` — Reads `prefix + key` from the underlying store; `null` when missing. Throws for an invalid key.
 - `put(key: string, bytes: Uint8Array, contentType: string): Promise<void>` — Writes `prefix + key` in the underlying store. Throws for an invalid key.
 - `head(key: string): Promise<boolean>` — Whether `prefix + key` exists in the underlying store. Throws for an invalid key.
@@ -10664,6 +10787,9 @@ A group in the summary (an environment, a producer, a domain, a spec): how many 
 
 ```ts
 export type CatalogSummary = {
+  /** Navigation destinations represented by the current report. */
+  readonly hasUiCatalog?: boolean;
+  readonly hasCritiques?: boolean;
   readonly tests: number;
   /** Tests by their current status. */
   readonly counts: StatusCounts;
@@ -10740,6 +10866,10 @@ One of `TEST_SORTS`. `spec` (the default) orders by domain, spec and title.
 
 ```ts
 export type TestQuery = {
+  /** Require a playable recording in a current result. */
+  readonly video?: boolean;
+  /** Return exact filter counts before pagination. */
+  readonly counts?: boolean;
   /** Words that must all appear in the title, id, spec, domain, tags, labels, environments or producers. Case does not matter. */
   readonly q?: string;
   /** Current status, or `flaky`. */
@@ -10759,6 +10889,8 @@ export type TestQuery = {
   /** Only tests recorded in this run (a key from `runList`). */
   readonly run?: string;
   readonly sort?: TestSort;
+  /** Continue after this test key in the filtered sort order. */
+  readonly cursor?: string;
   readonly offset?: number;
   /** At most this many tests (default 500, at most 20000). */
   readonly limit?: number;
@@ -10771,6 +10903,10 @@ Which tests to list. Every field is optional; several values of one field match 
 
 ```ts
 export type TestCatalog = {
+  /** Counts for the current filters with the counted dimension omitted, before pagination. */
+  /** Last test key on this page when another page follows. */
+  readonly nextCursor?: string;
+  readonly filterCounts?: { status: Record<string, number>; environment: Record<string, number>; video: number };
   readonly schemaVersion: typeof TEST_CATALOG_VERSION;
   /** Changes whenever the report or its history does. */
   readonly version: string;
@@ -11045,6 +11181,7 @@ const catalog = testCatalog(catalogModel(layers, { history }));
 - `tests(): readonly { readonly key: string; readonly id: string; readonly specPath: string | null }[]` — Every test the history holds a result for (keyed as `TestSummary.key`), including tests the report no longer has a current result for.
 - `get layers(): number { return this.#seen.size; }` — How many layers were added.
 - `add(layer: LayerHeader, rows: readonly LayerRow[], specs: readonly SpecEntry[] = [], backend = layer.backend, fingerprints: Readonly<Record<string, string>> = {}): void` — Takes in one layer: its header, its rows, the specs it recorded and the backend it was read from. A layer id already added is ignored. `fingerprints` (spec path to the fingerprint the layer recorded, as `LayerRows.fingerprints`) gives each result its `specRevision`; without it no result has one.
+- `async forgetProgress(runId: string, ids: ReadonlySet<string>, read: (id: string) => Promise<LayerEvidence>): Promise<void>` — Forget superseded live progress from an invocation after its final layer has been stored.
 - `of(key: string): readonly TestResultEntry[]` — The recorded results of one test (by `TestSummary.key`), newest first. Empty when none.
 - `get runCount(): number { return this.#runs.size; }` — How many runs it knows of.
 - `runs(): RunSummary[]` — Every run, newest first.
@@ -14161,8 +14298,8 @@ Source: `packages/reports/src/vercel-blob-store.ts`. Import: `@crvouga/atlas/rep
 An `ObjectStore` on Vercel Blob, written without the `@vercel/blob` SDK: its HTTP API is called with `fetch`, the
 same way the S3 store signs its own requests, so it adds nothing to the install and runs on Bun and Node. Objects
 are private and kept under their exact keys (no random suffix, overwrite allowed, so a retried write lands on the
-same key with the same bytes), and are read back with the store's token. `getUri` never returns a URL that works
-without the token: it answers `null`, and the server streams the bytes instead. Importing the module does no work.
+same key with the same bytes), and are read back with the store's token. `getUri` returns a signed read URL for one object
+with a lifetime of at most five minutes. Importing the module does no work.
 
 See docs/deploying.md#vercel-blob
 See docs/report-contract.md#backends
@@ -14207,7 +14344,7 @@ says whether trying again can help; the store already retried before throwing.
 #### `VercelBlobStore`
 
 ```ts
-export type VercelBlobStore = ObjectStore & PagedListing & SignedDownloads & {
+export type VercelBlobStore = ObjectStore & ConditionalWrites & StagedUploads & PagedListing & SignedDownloads & {
   /** A description with no secrets: `vercel-blob://my-project/ (store abc123)`. */
   readonly label: string;
   /**
@@ -14255,8 +14392,7 @@ Throttling, server errors and network failures are retried with jittered backoff
 
 Behaviour to know: the constructor throws when there is no token, or the token is not a read-write token (the store
 id is read from it). `signedUrl` returns a presigned read URL of one object, valid as long as asked (at most the
-hour-long delegation it is signed from), with the stored type and size. `getUri` always answers `null`: a private object has no URL that works without the token, and a
-permanently public one is never handed out. `listKeys` pages through the whole listing and sorts it. `listPage`
+hour-long delegation it is signed from), with the stored type and size. `getUri` signs one object for at most five minutes and returns null for a missing key. `listKeys` pages through the whole listing and sorts it. `listPage`
 continues from the service's cursor when it is asked for the page after the one it last returned, and otherwise
 lists the prefix and filters it, so it is always correct and usually one request. `deleteMany` sends 100 keys per request.
 

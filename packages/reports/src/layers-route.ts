@@ -20,6 +20,7 @@ import type { ActiveRun, BackendInfo, EvidencePage, LayerEvidence, LayerHeader, 
 import { isFramePath, isKeySegment } from './keys';
 import { catalogEntries, catalogLayers } from './layer-catalog';
 import { attachmentResponse } from './attachment-response';
+import { expiryPrefix, expiredFiles, withoutExpiredFiles } from './attachment-retention';
 import { checkDetailOf, partsEvidence, runEvidence } from './evidence-detail';
 import { layerEvidence } from './layer-merge';
 import { layerSummary, readLayer } from './layer-store';
@@ -104,7 +105,7 @@ export function createLayersApp(deps: ReportsAppDeps) {
   const listings: (Listing | undefined)[] = backends.map(() => undefined);
   let pending: Promise<Entry[]> | null = null;
   const loaded = new Map<string, { at: number; value: Promise<readonly LayerEvidence[]> }>();
-  const readers = new Map<string, ReturnType<typeof createBundleReader>>();
+  const readers = new Map<string, { store: ObjectStore; read: ReturnType<typeof createBundleReader> }>();
   const live = createLiveEvidence({ live: deps.live, clock: deps.clock, backend: LOCAL_BACKEND });
 
   function freshFor(backend: Backend): number {
@@ -173,13 +174,14 @@ export function createLayersApp(deps: ReportsAppDeps) {
         const layer = await readLayer(backend.store, id).catch(() => null);
         // A layer the host leaves out has no files to give either.
         if (!layer || !include(layerEvidence(layerSummary(layer), backend.id).layer)) continue;
-        reader = createBundleReader(backend.store, layer.bundle);
+        reader = { store: backend.store, read: createBundleReader(backend.store, layer.bundle) };
         if (readers.size >= 8) readers.delete(readers.keys().next().value!);
         readers.set(id, reader);
         break;
       }
     }
-    return reader?.(path) ?? null;
+    if (reader && path.startsWith('attachments/') && await reader.store.head(expiryPrefix(id) + path)) return null;
+    return reader?.read(path) ?? null;
   }
 
   async function activeRecords(): Promise<LiveRunRecord[]> {
@@ -257,8 +259,18 @@ export function createLayersApp(deps: ReportsAppDeps) {
     const id = c.req.param('id');
     const evidence = backend < 0 ? null : await findEvidence(backend, id);
     if (!evidence || !include(evidence.layer)) return c.notFound();
-    const rows: LayerRows = { id: evidence.id, rows: evidence.rows, fingerprints: evidence.fingerprints };
-    return c.json(rows, 200, { 'cache-control': archived(id) ? 'public, max-age=31536000, immutable' : 'no-cache' });
+    let shown = evidence;
+    if (archived(id)) {
+      const source = backends[backend]!;
+      const expired = await expiredFiles(source.store, id);
+      if (expired.length) {
+        const layer = await readLayer(source.store, id);
+        if (!layer) return c.notFound();
+        shown = layerEvidence(layerSummary(withoutExpiredFiles(layer, expired)), source.id);
+      }
+    }
+    const rows: LayerRows = { id: shown.id, rows: shown.rows, fingerprints: shown.fingerprints };
+    return c.json(rows, 200, { 'cache-control': 'no-cache' });
   });
   // The files a layer carries for its checks: screenshots, videos, traces, logs, snapshots, anything.
   app.get('/layers/:id/blobs/*', async c => {
@@ -277,14 +289,15 @@ export function createLayersApp(deps: ReportsAppDeps) {
     if (!backend || !archived(id)) return c.notFound();
     const layer = await readLayer(backend.store, id).catch(() => null);
     if (!layer || !include(layerEvidence(layerSummary(layer), backend.id).layer)) return c.notFound();
+    const shown = withoutExpiredFiles(layer, await expiredFiles(backend.store, id));
     const checkId = c.req.query('check');
-    const headers = { 'cache-control': 'public, max-age=31536000, immutable' };
+    const headers = { 'cache-control': 'no-cache' };
     if (checkId === undefined) {
       // The parts' own evidence is optional: a client that does not know `parts` still has the run's.
-      const parts = partsEvidence(layer as never);
-      return c.json({ layer: id, run: runEvidence(layer), ...(parts.length ? { parts } : {}) }, 200, headers);
+      const parts = partsEvidence(shown as never);
+      return c.json({ layer: id, run: runEvidence(shown), ...(parts.length ? { parts } : {}) }, 200, headers);
     }
-    const detail = checkDetailOf(layer as never, checkId, c.req.query('kind'));
+    const detail = checkDetailOf(shown as never, checkId, c.req.query('kind'));
     return detail ? c.json(detail, 200, headers) : c.notFound();
   });
   app.get('/layers/:id/*', async c => {

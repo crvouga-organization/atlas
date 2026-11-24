@@ -7,14 +7,20 @@ import AtlasCodeceptReporter from './codecept';
 import AtlasMochaReporter from './mocha';
 import AtlasJestReporter from './jest';
 import atlasNodeReporter from './node-test';
-import { uploadChecks } from './publish';
+import { finishRunner, runnerLive, uploadChecks } from './publish';
 
 const running: { app: AtlasServer; http: RunningServer }[] = [];
 afterEach(async () => { for (const { app, http } of running.splice(0)) { app.close(); await http.close(); } });
-async function server() {
+async function server(batchLimit = Infinity) {
   const app = createAtlasServer({ backends: [{ id: 'data', store: memoryStore() }], write: 'data', tokens: [{ name: 'ci', role: 'publish', token: 'publish-token-123' }] });
   await app.ready;
-  const http = await listen(app.fetch, { host: '127.0.0.1', port: 0, maxBodyBytes: 32 * 1024 * 1024 });
+  const http = await listen(async request => {
+    if (Number.isFinite(batchLimit) && (request.method === 'PATCH' || new URL(request.url).pathname === '/api/checks')) {
+      const input = await request.clone().json() as { checks?: unknown[] };
+      if ((input.checks?.length ?? 0) > batchLimit) return new Response(null, { status: 413 });
+    }
+    return app.fetch(request);
+  }, { host: '127.0.0.1', port: 0, maxBodyBytes: 32 * 1024 * 1024 });
   running.push({ app, http });
   return { app, options: { url: http.url, token: 'publish-token-123', rootDir: '/project' } };
 }
@@ -103,4 +109,13 @@ test('bad destination and publication errors cannot silently pass CI', async () 
   const runner = new EventEmitter();
   const reporter = new AtlasMochaReporter(runner, { reporterOptions: { ...options, token: 'bad-token' } });
   expect(await new Promise<number>(resolve => reporter.done(0, resolve))).toBe(1);
+});
+
+test('native progress and final publication split at a host limit and compact the entire invocation', async () => {
+  const { app, options } = await server(3);
+  const live = runnerLive('suite', options);
+  const rows = Array.from({ length: 9 }, (_, i) => ({ id: String(i), title: String(i), detail: '', measurements: [], status: 'passed' as const }));
+  await finishRunner(live, 'suite', rows, options);
+  expect(checks(app)).toHaveLength(9);
+  expect(app.index.snapshot().totalLayers).toBe(4);
 });

@@ -106,6 +106,11 @@ const BASE_OPERATIONS: readonly Operation[] = [
     responses: { '200': { description: 'Available project identities.', contentType: 'application/json', schema: schemaOf(ProjectsSchema) }, '401': UNAUTHORIZED, '503': problem('The project catalog is unavailable.') }
   },
   {
+    route: 'GET /api/storage', path: '/api/storage', operationId: 'getStorageUsage', tag: 'Operations', role: 'admin',
+    summary: 'Measure project storage', description: 'Physical objects and bytes by prefix, producer, branch and attachment role. Shared files count once per group. The total excludes child projects and temporary collector work.',
+    responses: { '200': { description: 'Project usage and group breakdowns.', contentType: 'application/json', schema: { type: 'object' } }, '403': FORBIDDEN }
+  },
+  {
     route: 'GET /api/live', path: '/api/live', operationId: 'listLiveRuns', tag: 'Live', role: 'read',
     summary: 'Live test progress and recent invocations', description: 'Returns up to 50 recent producer leases, including running, completed and interrupted runs. Counters and recent check/step updates are bounded; authentication credentials are never returned. Consume run events for immediate bounded snapshots; re-fetch after reconnect or atlas:change with scope runs on older servers.',
     responses: { '200': { description: 'Recent live run summaries.', contentType: 'application/json', schema: { type: 'object', properties: { runs: { type: 'array', items: ref('LiveRun') } }, required: ['runs'] } }, '401': UNAUTHORIZED }
@@ -123,6 +128,13 @@ const BASE_OPERATIONS: readonly Operation[] = [
     parameters: [{ name: 'id', in: 'path', required: true, description: 'The UUID of a run started with this publisher token.', schema: str }],
     body: { description: 'At most 1000 unique check updates; optional terminal state and reason.', contentType: 'application/json', required: true, schema: ref('LiveRunUpdate') },
     responses: { '200': json('Updated progress.', 'LiveRun'), '401': UNAUTHORIZED, '403': FORBIDDEN, '404': problem('Unknown run.'), '409': problem('Run ended or sequence is stale.'), '413': problem('Request too large.'), '422': problem('Invalid progress.'), '429': problem('Run check capacity reached.') }
+  },
+  {
+    route: 'POST /api/live/:id/compact', path: '/api/live/{id}/compact', operationId: 'compactLiveRun', tag: 'Live', role: 'publish',
+    summary: 'Compact completed live progress', description: 'The original publisher supplies the id of the final published layer. Only its own completed invocation’s progress layers entirely superseded by the final layer are removed.',
+    parameters: [{ name: 'id', in: 'path', required: true, description: 'Live invocation UUID.', schema: str }],
+    body: { description: 'Final layer digest and optional additional pieces of the same invocation.', contentType: 'application/json', required: true, schema: { type: 'object', properties: { layer: str, additional: { type: 'array', items: str } }, required: ['layer'] } },
+    responses: { '200': { description: 'Compaction finished.' }, '401': UNAUTHORIZED, '403': FORBIDDEN, '409': problem('The final layer is unavailable or belongs to another invocation.'), '422': problem('Invalid layer id.') }
   },
   {
     route: 'POST /api/live/:id/heartbeat', path: '/api/live/{id}/heartbeat', operationId: 'heartbeatLiveRun', tag: 'Live', role: 'publish',
@@ -335,14 +347,15 @@ const BASE_OPERATIONS: readonly Operation[] = [
     description: [
       'For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.',
       '',
-      '1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.',
+      'For a manifest PUT, a server advertising `uploads.gzipManifests` accepts `X-Atlas-Compression: gzip` and validates the decompressed manifest against its size limit.',
+      '1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…", "sha256": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.',
       '2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).',
-      '3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.',
+      '3. `POST /api/store/<key>?upload=complete`. If start returned `staged: true`, repeat the start body. The server verifies staged bytes before creating the destination. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.',
       '',
       'Only files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.'
     ].join('\n'),
     parameters: [KEY, { name: 'upload', in: 'query', description: '`start` or `complete`.', schema: { type: 'string', enum: ['start', 'complete'] } }],
-    body: { description: 'For `start`: the size in bytes and the content type.', contentType: 'application/json', schema: { type: 'object', properties: { size: { type: 'integer', minimum: 0 }, contentType: str } }, required: false },
+    body: { description: 'For start and staged completion, the byte length, media type and SHA-256 of the upload.', contentType: 'application/json', schema: { type: 'object', properties: { size: { type: 'integer', minimum: 0 }, contentType: str, sha256: { type: 'string', pattern: '^[0-9a-f]{64}$' } } }, required: false },
     responses: {
       '200': { description: '`start`: where to send the bytes, or that the blob is already there.' }, '201': json('`complete`: checked and accepted.', 'StoreWriteResult'),
       '401': UNAUTHORIZED, '403': FORBIDDEN, '404': problem('This server takes uploads only through `PUT`.'), '413': problem('Over `limits.maxObjectMiB`.'),
@@ -369,6 +382,8 @@ const BASE_OPERATIONS: readonly Operation[] = [
     parameters: [
       { name: 'q', in: 'query', description: 'Words that must all appear in the title, id, spec, domain, tags, labels, environments or producers. Case does not matter.', schema: str, example: 'checkout card' },
       { name: 'status', in: 'query', description: 'Current status, or `flaky`. Repeatable or comma-separated.', schema: str, example: 'failed,flaky' },
+      { name: 'counts', in: 'query', description: 'Use 1 for exact disjunctive status, environment and video counts before pagination.', schema: str },
+      { name: 'has', in: 'query', description: 'Use video to require a playable recording in a current result.', schema: str, example: 'video' },
       { name: 'environment', in: 'query', description: 'Only tests with a result on this environment. Repeatable or comma-separated.', schema: str, example: 'desktop-web' },
       { name: 'producer', in: 'query', description: 'Only tests from this producer. Repeatable or comma-separated.', schema: str },
       { name: 'domain', in: 'query', description: 'Only tests whose spec is in this domain (`(no spec)` for none). Repeatable or comma-separated.', schema: str },
@@ -379,6 +394,7 @@ const BASE_OPERATIONS: readonly Operation[] = [
       { name: 'scope', in: 'query', description: 'Only tests with one playable recording that states every one of these producer-declared qualifications: `surface:<value>`, `device:<value>` (`device:physical` and `device:simulator` stay apart), `data:synthetic` or `data:real`, `dependencies:<value>`, `audio:recorded` or `audio:silent`, `pacing:<value>`. All must hold for the same recording. A recording that did not declare a value never matches it, and `unknown` matches only a recording that declared no scope. Repeatable or comma-separated.', schema: str, example: 'device:physical,audio:recorded' },
       { name: 'run', in: 'query', description: 'Only tests recorded in this run (a `key` from `/api/reports/runs`).', schema: str },
       { name: 'sort', in: 'query', description: 'The order: `spec` (default: domain, spec, title), `title`, `recent`, `slowest`, `failures`, `flaky` or `runs`.', schema: { type: 'string', enum: ['spec', 'title', 'recent', 'slowest', 'failures', 'flaky', 'runs'] } },
+      { name: 'cursor', in: 'query', description: 'Continue after the test key returned as nextCursor.', schema: { type: 'string' } },
       { name: 'offset', in: 'query', description: 'Skip this many matching tests.', schema: { type: 'integer', minimum: 0 } },
       { name: 'limit', in: 'query', description: 'At most this many tests (default 500, at most 20000).', schema: { type: 'integer', minimum: 0, maximum: 20000 } },
       { name: 'format', in: 'query', description: '`markdown` for a Markdown report instead of JSON.', schema: { type: 'string', enum: ['json', 'markdown'] } }

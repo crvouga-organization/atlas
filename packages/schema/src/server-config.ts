@@ -10,6 +10,7 @@
  * @see docs/deploying.md
  * @see docs/server.md
  */
+import { GcPolicySchema } from './gc-policy';
 import { z } from 'zod/v4';
 
 /**
@@ -37,6 +38,7 @@ export const ServerTokenSchema = z
  * The whole `atlas.server.json`: listening address, authentication, the viewer to serve, which layers take part in the report, refresh and heartbeat intervals, request limits and logging.
  */
 export const ServerConfigSchema = z.strictObject({
+  gc: GcPolicySchema.optional().describe('Deployment-owned retention policy, overriding a policy saved in object storage'),
   $schema: z.string().optional(),
   host: z.string().default('127.0.0.1').describe('Where to listen. 127.0.0.1 keeps it on this machine; 0.0.0.0 is every interface and needs tokens (or `auth.insecure`)'),
   port: z.number().int().min(0).max(65535).default(8080),
@@ -60,6 +62,7 @@ export const ServerConfigSchema = z.strictObject({
       roots: z.array(z.string().refine((value) => value.includes('>'), { message: 'Write a root mapping as from>to, e.g. ">specs/" (paths under `from` are the same specs as paths under `to`)' })).default([]).describe('Root mappings `from>to` that relate spec paths a producer publishes to the paths the specs are recorded under (an empty `from` matches every path). The catalog health report applies them to every request, beside any `root` the request adds')
     })
     .default({ roots: [] }),
+  events: z.enum(['on', 'off']).default('on').describe('Use off to disable server-sent events'),
   refreshSeconds: z.number().min(1).default(10).describe('How often the backends are looked at for layers written by something other than this server'),
   limits: z
     .strictObject({

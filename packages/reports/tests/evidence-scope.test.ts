@@ -151,9 +151,33 @@ describe('through a published layer', () => {
     expect(videos.map(item => [item.name, item.attempt, item.scope?.deviceKind])).toEqual([['first.webm', 0, 'simulator'], ['second.webm', 1, 'physical']]);
   });
 
+  test('a failed-status and video query pages matches and counts the whole filtered project', async () => {
+    const { store } = await published();
+    await publishChecks(store, { producer: 'ci', recordedAtMs: 2000, checks: [
+      { id: 'failed-video', title: 'Failed with video', status: 'failed', attachments: [video('fail.webm')] },
+      { id: 'failed-text', title: 'Failed without video', status: 'failed' }
+    ] });
+    const index = new ReportIndex([{ id: 'one', store }]);
+    await index.refresh();
+    const model = modelOf(index);
+    const query = parseTestQuery(new URLSearchParams('status=failed&has=video&counts=1&limit=1'));
+    const page = testCatalog(model, query);
+    expect(page.total).toBe(1);
+    expect(page.tests[0]?.id).toBe('failed-video');
+    expect(page.filterCounts).toMatchObject({ status: { passed: 5, failed: 1 }, video: 1 });
+    const first = testCatalog(model, { limit: 1 });
+    const second = testCatalog(model, { cursor: first.nextCursor, limit: 1 });
+    expect(second.offset).toBe(1);
+    expect(second.tests[0]?.key).toBe(testCatalog(model).tests[1]?.key);
+  });
+
   test('the facets count the tokens, the history names them, and the query reads from an address', async () => {
     const { catalog: model } = await published();
     const catalog = testCatalog(model());
+    const videoQuery = parseTestQuery(new URLSearchParams('has=video&limit=1'));
+    const videoPage = testCatalog(model(), videoQuery);
+    expect(videoPage.total).toBe(catalog.tests.filter(test => test.scopeProfiles?.length).length);
+    expect(videoPage.tests).toHaveLength(1);
     const facet = Object.fromEntries(catalog.facets.scopes!.map(item => [item.value, item.count]));
     expect(facet['device:physical']).toBe(2);
     expect(facet['device:simulator']).toBe(2);

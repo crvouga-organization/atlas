@@ -41,7 +41,7 @@ const next = 'b'.repeat(64);
 type Call = { url: string; init: RequestInit };
 const policy = { enabled: true, maxAgeDays: 45, keepLatest: 5, intervalHours: 12 };
 /** A server whose settings and policy live behind /api/settings and /api/settings/gc, as in S3. */
-function server(saved: { policy: typeof policy | null; settings?: Record<string, unknown> } = { policy: null }) {
+function server(saved: { policy: typeof policy | null; settings?: Record<string, unknown>; source?: string } = { policy: null }) {
   const calls: Call[] = [];
   const state = { ...saved };
   globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
@@ -51,9 +51,10 @@ function server(saved: { policy: typeof policy | null; settings?: Record<string,
         runs: [{ project: 'default', dryRun: true, at: '2026-10-28T00:00:00Z', candidates: 7, deletedLayers: 0, deletedBlobs: 0, keptLayers: 3 }],
         policy: state.policy
       });
+    if (url === '/api/projects/default/storage') return Response.json({ bytes: 12500, objects: 8, prefix: {}, producer: {}, branch: {}, role: {} });
     if (url === '/api/settings/gc') {
       if (init.method === 'PUT') state.policy = JSON.parse(init.body as string);
-      return Response.json({ revision: init.method === 'PUT' ? next : revision, policy: state.policy, saved: state.policy !== null, lastRuns: [], stateKey: 'server/state.json' });
+      return Response.json({ revision: init.method === 'PUT' ? next : revision, policy: state.policy, source: state.source, saved: !state.source && state.policy !== null, lastRuns: [], stateKey: 'server/state.json' });
     }
     if (init.method === 'PUT') state.settings = JSON.parse(init.body as string);
     return Response.json({ revision: init.method === 'PUT' ? next : revision, settings: state.settings ?? {}, active: { refreshSeconds: 17 }, restartRequired: init.method === 'PUT' });
@@ -73,7 +74,8 @@ test('admin page loads settings and the policy with Bearer authentication and sa
   expect(document.getElementById('configuration')).toBeNull();
   await type('token', 'admin-secret');
   await click('load');
-  expect(calls.map((call) => call.url)).toEqual(['/api/settings', '/api/settings/gc']);
+  expect(calls.map((call) => call.url)).toEqual(['/api/settings', '/api/settings/gc', '/api/projects/default/storage']);
+  expect(document.getElementById('gc-empty')?.textContent).toContain('Project storage:');
   expect((document.getElementById('refreshSeconds') as HTMLInputElement).value).toBe('20');
   expect(document.querySelector('label[for="refreshSeconds"]')?.parentElement?.textContent).toContain('Current: 17');
   await type('refreshSeconds', '25');
@@ -120,6 +122,16 @@ test('with no policy saved the page says nothing is deleted, and saving one writ
   expect(document.getElementById('gc-empty')).toBeNull();
   expect(JSON.stringify([{ ...localStorage }, { ...sessionStorage }])).toBe(before);
 });
+test('a deployment policy allows preview and collection before any admin save', async () => {
+  server({ policy, source: 'env' });
+  await open();
+  await click('load');
+  expect(document.body.textContent).toContain('This policy is managed by environment variables.');
+  expect((document.getElementById('gc-save') as HTMLButtonElement).disabled).toBe(true);
+  expect((document.getElementById('gc-maxAgeDays') as HTMLInputElement).disabled).toBe(true);
+  expect((document.getElementById('gc-preview') as HTMLButtonElement).disabled).toBe(false);
+  expect((document.getElementById('gc-run') as HTMLButtonElement).disabled).toBe(false);
+});
 test('a saved policy is shown as loaded from S3, and a preview lists what would be deleted without deleting', async () => {
   const calls = server({ policy });
   await open();
@@ -137,6 +149,7 @@ test('a saved policy is shown as loaded from S3, and a preview lists what would 
 test('invalid JSON and stale revisions block saves until corrected or reloaded', async () => {
   let requests = 0;
   globalThis.fetch = (async (url: string) => {
+    if (url === '/api/projects/default/storage') return Response.json({ bytes: 0, objects: 0 });
     requests++;
     if (url === '/api/settings/gc') return Response.json({ revision, policy: null, saved: false, lastRuns: [], stateKey: 'server/state.json' });
     return requests <= 2

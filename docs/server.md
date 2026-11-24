@@ -140,24 +140,34 @@ Everything a person using Atlas has chosen is **user state**: one JSON document,
 (published as [`user-state.schema.json`](https://github.com/crvouga/atlas/blob/main/packages/schema/schemas/user-state.schema.json))
 
 - **`gc` is the garbage collection policy**, defined in the Atlas UI (**Settings**, `/admin`, *Garbage collection*) and
-  read by the server **from S3 every time it collects**, so a saved policy applies at the next pass without a restart.
+  read by the server **from S3 every time it collects** when the deployment has no retention policy. A saved policy applies at the next pass without a restart.
 - **`settings`** are the report and live-run settings saved from the same page. They apply at the next start, below
   `atlas.server.json`, the environment and the flags in precedence.
 - A document that does not exist is an empty state; one that exists but cannot be parsed stops the server and is
   never overwritten.
 
-**No policy saved yet.** Atlas is deletion-free until someone says otherwise: with no `gc` in the document,
-garbage collection is **off and nothing is ever deleted**. The server says so at start, the API answers
-`saved: false, policy: null`, the page shows a "No policy has been saved yet" notice with suggested values that take
-effect only after you turn collection on and save, and `POST /api/settings/gc/run` answers 409. There is no
-fallback to a file, an environment variable or built-in numbers.
+**Deployment retention.** Set `gc` in `atlas.server.json` to override the saved policy. The `ATLAS_GC_*`
+variables override individual deployment fields. A deployment policy applies from startup, including on an empty store. For example,
+`ATLAS_GC_MAX_AGE_DAYS=3` activates a three-day policy with the default newest-layer protection. Set
+`ATLAS_GC_ENABLED=false` to disable it. With no deployment or saved policy, collection stays off.
+The settings API reports the effective policy and its source. Deployment policies are read-only in
+`/admin`, which also measures project bytes and object counts by prefix, producer, branch and file role.
+
+A policy can set `maxBytes` (for example `"10GB"`). Over budget, the collector considers superseded
+layers oldest first while protecting the newest `keepLatest`. Shared files count once. A project whose
+winners exceed the budget can stay over it.
+
+Set `attachments: { "maxAgeDays": 3, "keepForStatus": ["failed"] }` to expire superseded captured files
+earlier than history. Optional `rules` match `role`, `status` and `branch` and supply their own
+`maxAgeDays`. The first matching rule applies. A branch of `!default` excludes the configured outline branch, or both `main` and `master` when none is configured. An expiry receipt preserves the immutable manifest and
+the viewer shows an evidence-expired note. A shared chunk stays while another file needs it.
 
 **What a policy deletes.** With `enabled: true`, every `intervalHours` (and shortly after start) the server applies the
 policy to every project. It deletes a report layer only when all of these hold:
 
 1. the server has read it and every check it carries has been replaced by a newer layer, so it no longer decides any
    result (deleting it cannot change the report);
-2. it was recorded more than `maxAgeDays` days ago;
+2. it exceeds the age limit or collection needs it to meet the storage budget;
 3. it is not one of the newest `keepLatest` layers of its project.
 
 The layer's catalog entry goes first (so nothing visible points at a missing manifest), then its manifest, then the
@@ -172,7 +182,7 @@ points at a missing file; keep `maxAgeDays` well above the time uploads take.
 same-origin in browsers) read and save the policy; `POST /api/settings/gc/run` applies it now, and
 `POST /api/settings/gc/run?dryRun=1` only counts what would go. A save that races another is refused with 409. The
 revision is the SHA-256 of the stored document, so saving the policy and saving settings invalidate each other's
-revision: reload, then save. An object store has no conditional writes, so run one server per bucket.
+revision: reload, then save. Blob and S3 compare the stored object version on save, including when requests reach different instances.
 
 **Passes.** Applying a policy to tens of thousands of layers takes longer than a proxy or a serverless function lets a
 request last, so it runs as a **pass** kept in the store (`server/gc/runs/<id>.json`) rather than inside the request:
@@ -226,6 +236,12 @@ is said in words and the server does not start. The file has a published
 <!-- generated:server-settings -->
 | Setting | File key | Flag | Environment | Default |
 | --- | --- | --- | --- | --- |
+| Project storage budget | `gc.maxBytes` |  | `ATLAS_GC_MAX_BYTES` | unlimited |
+| Age for expiring superseded attachments | `gc.attachments.maxAgeDays` |  | `ATLAS_GC_ATTACHMENTS_MAX_AGE_DAYS` | layer age |
+| Deployment retention: enabled | `gc.enabled` |  | `ATLAS_GC_ENABLED` | saved policy |
+| Deployment retention: maxAgeDays | `gc.maxAgeDays` |  | `ATLAS_GC_MAX_AGE_DAYS` | saved policy |
+| Deployment retention: keepLatest | `gc.keepLatest` |  | `ATLAS_GC_KEEP_LATEST` | saved policy |
+| Deployment retention: intervalHours | `gc.intervalHours` |  | `ATLAS_GC_INTERVAL_HOURS` | saved policy |
 | S3 endpoint URL (**required**) | `storage.s3.endpoint` |  | `ATLAS_S3_ENDPOINT` | **none: the server refuses to start** |
 | Bucket for all reports and user state (**required**) | `storage.s3.bucket` |  | `ATLAS_S3_BUCKET` | **none: the server refuses to start** |
 | Bucket region (**required**) | `storage.s3.region` |  | `ATLAS_S3_REGION` | **none: the server refuses to start** |
@@ -237,6 +253,7 @@ is said in words and the server does not start. The file has a published
 | Which storage keeps everything: `s3` or `vercel-blob` (a private Blob store, with `BLOB_READ_WRITE_TOKEN` and optionally `ATLAS_BLOB_PREFIX`) | `storage.kind` |  | `ATLAS_STORAGE` | `vercel-blob` when `BLOB_READ_WRITE_TOKEN` is the only storage set, else `s3` |
 | CI repositories that may publish without a token, by OIDC identity: `github:<owner>`, `github:<owner>/<repo>` or `github:<owner>/<repo>@<ref>` (comma-separated; `none` for nobody) | `auth.trustedPublishers` |  | `ATLAS_TRUSTED_PUBLISHERS` | the GitHub owner the server was deployed from on Vercel or Railway, else nobody |
 | The URLs this server is published at (comma-separated); a CI identity token must be addressed to one. Set it when callers reach the server without a platform router in front | `publicUrls` |  | `ATLAS_PUBLIC_URL` | the host each request arrived on |
+| Enable server-sent events | `events` |  | `ATLAS_EVENTS` | on |
 | Address to listen on | `host` | `--host <address>` | `ATLAS_HOST`, `HOST` | `127.0.0.1` |
 | Port (`0` picks a free one) | `port` | `--port <n>` | `ATLAS_PORT`, `PORT` | `8080` |
 | The built client | `site` | `--site <dir>` | `ATLAS_SITE` | `./atlas-site`, else built once |
@@ -573,12 +590,16 @@ curl "$ATLAS_SERVER_URL/api/projects/$ATLAS_PROJECT/reports/tests?format=markdow
 | Method and path | Role | |
 | --- | --- | --- |
 | `GET /api/projects` | read | List projects on this Atlas node. |
+| `GET /api/storage` | admin | Measure project storage. |
+| `GET /api/projects/{project}/storage` | admin | Measure project storage. |
 | `GET /api/live` | read | Live test progress and recent invocations. |
 | `GET /api/projects/{project}/live` | read | Live test progress and recent invocations. |
 | `POST /api/live/{id}` | publish | Start a live producer lease. |
 | `POST /api/projects/{project}/live/{id}` | publish | Start a live producer lease. |
 | `PATCH /api/live/{id}` | publish | Publish progress or finish an invocation. |
 | `PATCH /api/projects/{project}/live/{id}` | publish | Publish progress or finish an invocation. |
+| `POST /api/live/{id}/compact` | publish | Compact completed live progress. |
+| `POST /api/projects/{project}/live/{id}/compact` | publish | Compact completed live progress. |
 | `POST /api/live/{id}/heartbeat` | publish | Renew a producer heartbeat. |
 | `POST /api/projects/{project}/live/{id}/heartbeat` | publish | Renew a producer heartbeat. |
 | `GET /admin` | read | Server settings page. |
@@ -776,7 +797,7 @@ What makes it so, none of it at the cost of the contract:
   starting a new server on a restored copy shows the same report and applies the same garbage collection policy.
 - **Stopping.** `SIGTERM` stops accepting, lets requests in flight finish, ends the event streams and exits 0.
 - **Logs.** One JSON line per request (method, path, status, ms) to stdout, none for the probes. The first lines
-  say which bucket it uses, what the garbage collection policy in S3 is (or that none is saved), and warn when there are no tokens.
+  say which bucket it uses, which garbage collection policy applies (or that collection is off), and warn when there are no tokens.
 - **A backend goes down.** The server keeps serving what it has, names the backend in the client and in
   `/readyz`, and recovers by itself. The gate fails closed: unknown is not a pass.
 - **Upgrades.** The layer format is a stable, versioned contract; upgrade the server before the clients that
@@ -801,7 +822,7 @@ Native test reporters for CodeceptJS, Mocha, Jest and Node upload directly to th
 
 The default native reporters and statechart runner stream tests and steps through `/api/live`, before the invocation finishes. Running tests appear inside their report with an animated status mark and the latest step. Open a test to read its progress log; its previous recorded result stays available separately. The **Running** filter narrows both the spec list and the test rows, and counts update as tests finish or time out. Statechart tests appear inside the chart and screen details. Selecting an archived run leaves live progress out of that historical view. Finished checks immediately enter normal immutable report layers. Operational progress is separate from historical winners, so a previous passed result never implies that the current invocation passed.
 
-Start with `POST /api/live/<uuid>`, send ordered check deltas with `PATCH /api/live/<uuid>`, and renew the producer lease with `POST /api/live/<uuid>/heartbeat` every 5 seconds. Finish with a terminal update. Only the publisher token that registered the invocation can update it. Replayed sequences must have identical content; late writes cannot revive an expired invocation. `createLiveReporter` handles batching, retries, heartbeat timers and the final flush.
+Start with `POST /api/live/<uuid>`, send ordered check deltas with `PATCH /api/live/<uuid>`, and renew the producer lease with `POST /api/live/<uuid>/heartbeat` every 5 seconds. Finish with a terminal update. Publishers that set `compactOnFinish` can confirm a durable final layer using `POST /api/live/<uuid>/compact`. A single-backend server removes intermediate layers only when that final layer supersedes every result they contain. Interrupted runs and multi-backend embeddings retain their progress layers. Only the publisher token that registered the invocation can update it. Replayed sequences must have identical content; late writes cannot revive an expired invocation. `createLiveReporter` handles batching, retries, heartbeat timers and the final flush.
 
 The server uses its own receipt clock. By default it interrupts a run after 30 seconds without a heartbeat (`ATLAS_RUN_TIMEOUT_SECONDS`). Heartbeats do not reset progress: after 15 minutes with no changed tests/steps, a separate stall timeout interrupts it (`ATLAS_RUN_STALL_SECONDS`, 0 disables). Both settings are editable in the admin UI. Healthy long tests continue renewing heartbeats; increase or disable the progress timeout for tests that legitimately make no observable progress for longer.
 

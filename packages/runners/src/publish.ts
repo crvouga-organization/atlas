@@ -37,6 +37,10 @@ export function testFile(file: string | undefined, root = process.cwd()): string
  * await uploadChecks('mocha', checks, { url: 'https://atlas.example.com', token: process.env.ATLAS_PUBLISH_TOKEN });
  */
 export async function uploadChecks(runner: string, checks: readonly EvidenceCheck[], options: ReporterOptions = {}): Promise<void> {
+  await sendChecks(runner, checks, options);
+}
+
+async function sendChecks(runner: string, checks: readonly EvidenceCheck[], options: ReporterOptions, live?: import('../../reports/src/live-reporter').LiveReporter): Promise<void> {
   const url = options.url ?? process.env.ATLAS_SERVER_URL;
   if (!url) throw new Error('Atlas reporter: set ATLAS_SERVER_URL to the project Atlas server');
   const target = new URL(url);
@@ -44,23 +48,35 @@ export async function uploadChecks(runner: string, checks: readonly EvidenceChec
   target.pathname = `${target.pathname.replace(/\/$/, '')}/api/checks`;
   // No token: from GitHub Actions with id-token: write, the job's identity is the credential (trusted publishing).
   const token = await bearerFor(url, options.token ?? process.env.ATLAS_PUBLISH_TOKEN ?? process.env.ATLAS_TOKEN);
-  const response = await fetch(target, {
-    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
-    headers: { ...processHeaders(), 'content-type': 'application/json', ...((options.project ?? process.env.ATLAS_PROJECT) ? { 'x-atlas-project': options.project ?? process.env.ATLAS_PROJECT! } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) },
-    body: JSON.stringify({ producer: options.producer ?? runner, recordedAtMs: options.recordedAtMs ?? Date.now(),
-      environment: options.environment ?? process.env.ATLAS_ENVIRONMENT,
-      branch: options.branch ?? process.env.ATLAS_BRANCH, sha: options.sha ?? process.env.ATLAS_SHA,
-      checks: uniqueChecks(checks) })
-  });
-  if (!response.ok) { await response.body?.cancel(); throw new Error(`Atlas reporter: upload refused (HTTP ${response.status})`); }
-  await response.body?.cancel();
+  const headers = { ...processHeaders(), 'content-type': 'application/json', ...((options.project ?? process.env.ATLAS_PROJECT) ? { 'x-atlas-project': options.project ?? process.env.ATLAS_PROJECT! } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) };
+  const metadata = { producer: options.producer ?? runner, recordedAtMs: options.recordedAtMs ?? Date.now(),
+    environment: options.environment ?? process.env.ATLAS_ENVIRONMENT,
+    branch: options.branch ?? process.env.ATLAS_BRANCH, sha: options.sha ?? process.env.ATLAS_SHA,
+    ...(live ? { run: { id: live.id } } : {}) };
+  const finalIds: string[] = [];
+  async function publish(batch: readonly EvidenceCheck[]): Promise<void> {
+    const response = await fetch(target, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
+      headers, body: JSON.stringify({ ...metadata, checks: batch }) });
+    if (response.status === 413 && batch.length > 1) {
+      await response.body?.cancel();
+      const middle = Math.ceil(batch.length / 2);
+      await publish(batch.slice(0, middle));
+      await publish(batch.slice(middle));
+      return;
+    }
+    if (!response.ok) { await response.body?.cancel(); throw new Error(`Atlas reporter: upload refused (HTTP ${response.status})`); }
+    if (live?.compact && live.finishedAtMs !== undefined) finalIds.push((await response.json() as { id: string }).id);
+    else await response.body?.cancel();
+  }
+  await publish(uniqueChecks(checks));
+  if (finalIds.length) await live?.compact?.(finalIds[0]!, finalIds.slice(1));
 }
 
 /** Start the native runner's live feed with the same endpoint and identity as its final report. */
 export function runnerLive(runner: string, options: ReporterOptions = {}, plannedChecks?: number): import('../../reports/src/live-reporter').LiveReporter {
   const url = options.url ?? process.env.ATLAS_SERVER_URL;
   if (!url) throw new Error('Atlas reporter: set ATLAS_SERVER_URL to the project Atlas server');
-  return createLiveReporter({ producer: options.producer ?? runner, plannedChecks, title: `${runner} tests`, environment: options.environment ?? process.env.ATLAS_ENVIRONMENT,
+  return createLiveReporter({ compactOnFinish: true, producer: options.producer ?? runner, plannedChecks, title: `${runner} tests`, environment: options.environment ?? process.env.ATLAS_ENVIRONMENT,
     branch: options.branch ?? process.env.ATLAS_BRANCH, sha: options.sha ?? process.env.ATLAS_SHA }, { url, project: options.project ?? process.env.ATLAS_PROJECT, token: options.token ?? process.env.ATLAS_PUBLISH_TOKEN ?? process.env.ATLAS_TOKEN, timeoutMs: options.timeoutMs });
 }
 
@@ -70,6 +86,6 @@ export async function finishRunner(live: import('../../reports/src/live-reporter
   const finalChecks = uniqueChecks(checks);
   finalChecks.forEach(check => live.check(check));
   try { await live.finish(); } catch (caught) { error = caught; }
-  try { await uploadChecks(runner, finalChecks, { ...options, recordedAtMs: Math.max(Date.now(), (live.finishedAtMs ?? 0) + 1) }); } catch (caught) { error ??= caught; }
+  try { await sendChecks(runner, finalChecks, { ...options, recordedAtMs: Math.max(Date.now(), (live.finishedAtMs ?? 0) + 1) }, live); } catch (caught) { error ??= caught; }
   if (error) throw error;
 }

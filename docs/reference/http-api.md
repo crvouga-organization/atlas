@@ -10,6 +10,28 @@ Projects are created on their first authenticated upload. All report, spec, reco
 
 Responses: `200` Available project identities.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `503` The project catalog is unavailable.
 
+### Measure project storage
+
+`GET /api/storage` · role: admin
+
+Physical objects and bytes by prefix, producer, branch and attachment role. Shared files count once per group. The total excludes child projects and temporary collector work.
+
+- `project` (query): Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.
+
+Responses: `200` Project usage and group breakdowns.; `403` The token is known but its role may not do this.
+
+### Measure project storage
+
+`GET /api/projects/{project}/storage` · role: admin
+
+Physical objects and bytes by prefix, producer, branch and attachment role. Shared files count once per group. The total excludes child projects and temporary collector work.
+
+Scoped to one project. The same project may be selected on the unprefixed API using ?project= or X-Atlas-Project. Unknown projects return 404 on reads and are created by an authenticated upload.
+
+- `project` (path, required): Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.
+
+Responses: `200` Project usage and group breakdowns.; `403` The token is known but its role may not do this.
+
 ### Live test progress and recent invocations
 
 `GET /api/live` · role: read
@@ -79,6 +101,30 @@ Scoped to one project. The same project may be selected on the unprefixed API us
 - `id` (path, required): The UUID of a run started with this publisher token.
 
 Responses: `200` Updated progress.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `404` Unknown run.; `409` Run ended or sequence is stale.; `413` Request too large.; `422` Invalid progress.; `429` Run check capacity reached.
+
+### Compact completed live progress
+
+`POST /api/live/{id}/compact` · role: publish
+
+The original publisher supplies the id of the final published layer. Only its own completed invocation’s progress layers entirely superseded by the final layer are removed.
+
+- `id` (path, required): Live invocation UUID.
+- `project` (query): Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.
+
+Responses: `200` Compaction finished.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `409` The final layer is unavailable or belongs to another invocation.; `422` Invalid layer id.
+
+### Compact completed live progress
+
+`POST /api/projects/{project}/live/{id}/compact` · role: publish
+
+The original publisher supplies the id of the final published layer. Only its own completed invocation’s progress layers entirely superseded by the final layer are removed.
+
+Scoped to one project. The same project may be selected on the unprefixed API using ?project= or X-Atlas-Project. Unknown projects return 404 on reads and are created by an authenticated upload.
+
+- `project` (path, required): Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.
+- `id` (path, required): Live invocation UUID.
+
+Responses: `200` Compaction finished.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `409` The final layer is unavailable or belongs to another invocation.; `422` Invalid layer id.
 
 ### Renew a producer heartbeat
 
@@ -479,9 +525,10 @@ Responses: `200` Already there with the same bytes.; `201` Stored.; `401` No tok
 
 For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.
 
-1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
+For a manifest PUT, a server advertising `uploads.gzipManifests` accepts `X-Atlas-Compression: gzip` and validates the decompressed manifest against its size limit.
+1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…", "sha256": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
 2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).
-3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
+3. `POST /api/store/<key>?upload=complete`. If start returned `staged: true`, repeat the start body. The server verifies staged bytes before creating the destination. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
 
 Only files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.
 
@@ -497,9 +544,10 @@ Responses: `200` `start`: where to send the bytes, or that the blob is already t
 
 For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.
 
-1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
+For a manifest PUT, a server advertising `uploads.gzipManifests` accepts `X-Atlas-Compression: gzip` and validates the decompressed manifest against its size limit.
+1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…", "sha256": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
 2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).
-3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
+3. `POST /api/store/<key>?upload=complete`. If start returned `staged: true`, repeat the start body. The server verifies staged bytes before creating the destination. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
 
 Only files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.
 
@@ -547,6 +595,8 @@ Send `format=markdown` (or `Accept: text/markdown`) for the same as a Markdown r
 
 - `q` (query): Words that must all appear in the title, id, spec, domain, tags, labels, environments or producers. Case does not matter.
 - `status` (query): Current status, or `flaky`. Repeatable or comma-separated.
+- `counts` (query): Use 1 for exact disjunctive status, environment and video counts before pagination.
+- `has` (query): Use video to require a playable recording in a current result.
 - `environment` (query): Only tests with a result on this environment. Repeatable or comma-separated.
 - `producer` (query): Only tests from this producer. Repeatable or comma-separated.
 - `domain` (query): Only tests whose spec is in this domain (`(no spec)` for none). Repeatable or comma-separated.
@@ -557,6 +607,7 @@ Send `format=markdown` (or `Accept: text/markdown`) for the same as a Markdown r
 - `scope` (query): Only tests with one playable recording that states every one of these producer-declared qualifications: `surface:<value>`, `device:<value>` (`device:physical` and `device:simulator` stay apart), `data:synthetic` or `data:real`, `dependencies:<value>`, `audio:recorded` or `audio:silent`, `pacing:<value>`. All must hold for the same recording. A recording that did not declare a value never matches it, and `unknown` matches only a recording that declared no scope. Repeatable or comma-separated.
 - `run` (query): Only tests recorded in this run (a `key` from `/api/reports/runs`).
 - `sort` (query): The order: `spec` (default: domain, spec, title), `title`, `recent`, `slowest`, `failures`, `flaky` or `runs`.
+- `cursor` (query): Continue after the test key returned as nextCursor.
 - `offset` (query): Skip this many matching tests.
 - `limit` (query): At most this many tests (default 500, at most 20000).
 - `format` (query): `markdown` for a Markdown report instead of JSON.
@@ -579,6 +630,8 @@ Scoped to one project. The same project may be selected on the unprefixed API us
 - `project` (path, required): Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.
 - `q` (query): Words that must all appear in the title, id, spec, domain, tags, labels, environments or producers. Case does not matter.
 - `status` (query): Current status, or `flaky`. Repeatable or comma-separated.
+- `counts` (query): Use 1 for exact disjunctive status, environment and video counts before pagination.
+- `has` (query): Use video to require a playable recording in a current result.
 - `environment` (query): Only tests with a result on this environment. Repeatable or comma-separated.
 - `producer` (query): Only tests from this producer. Repeatable or comma-separated.
 - `domain` (query): Only tests whose spec is in this domain (`(no spec)` for none). Repeatable or comma-separated.
@@ -589,6 +642,7 @@ Scoped to one project. The same project may be selected on the unprefixed API us
 - `scope` (query): Only tests with one playable recording that states every one of these producer-declared qualifications: `surface:<value>`, `device:<value>` (`device:physical` and `device:simulator` stay apart), `data:synthetic` or `data:real`, `dependencies:<value>`, `audio:recorded` or `audio:silent`, `pacing:<value>`. All must hold for the same recording. A recording that did not declare a value never matches it, and `unknown` matches only a recording that declared no scope. Repeatable or comma-separated.
 - `run` (query): Only tests recorded in this run (a `key` from `/api/reports/runs`).
 - `sort` (query): The order: `spec` (default: domain, spec, title), `title`, `recent`, `slowest`, `failures`, `flaky` or `runs`.
+- `cursor` (query): Continue after the test key returned as nextCursor.
 - `offset` (query): Skip this many matching tests.
 - `limit` (query): At most this many tests (default 500, at most 20000).
 - `format` (query): `markdown` for a Markdown report instead of JSON.

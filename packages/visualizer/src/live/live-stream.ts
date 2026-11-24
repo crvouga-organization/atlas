@@ -183,8 +183,7 @@ export function listenChanges(url: string, onChange: (change: AtlasChange) => vo
 /** The address of this server's event stream, when the page has one. */
 export const eventsAddress = () => runtimeUrl(runtimeConfig()?.eventsUrl);
 
-function snapshot(): LiveStatus {
-  const url = eventsAddress();
+function snapshot(url = eventsAddress()): LiveStatus {
   return (url && streams.get(url)?.status) || (url ? 'connecting' : 'off');
 }
 
@@ -194,8 +193,8 @@ function subscribeStatus(listener: () => void) {
 }
 
 /** Whether the report on screen is being kept up to date by the server. `off` for a static site. */
-export function useLiveStatus(): LiveStatus {
-  return useSyncExternalStore(subscribeStatus, snapshot, () => 'off');
+export function useLiveStatus(url = eventsAddress()): LiveStatus {
+  return useSyncExternalStore(subscribeStatus, () => snapshot(url), () => 'off');
 }
 
 /** Test seam: forget every stream. */

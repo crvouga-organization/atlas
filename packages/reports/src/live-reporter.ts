@@ -13,7 +13,7 @@ export type LiveIdentity = Omit<z.input<typeof LiveRunStartSchema>, 'id'> & { id
 /** Transport and batching configuration. Defaults: 250 ms batches, 5 s heartbeats and 10 s request timeouts. */
 export type LiveReporterOptions = { url: string; project?: string; token?: string; flushMs?: number; heartbeatMs?: number; timeoutMs?: number; onError?: (error: Error) => void };
 /** Producer handle. check never throws transport errors into a test; finish flushes and rejects if publication failed. */
-export type LiveReporter = { readonly id: string; readonly finishedAtMs?: number; check(check: LiveCheck): void; flush(): Promise<void>; finish(status?: 'completed' | 'interrupted', reason?: string): Promise<void> };
+export type LiveReporter = { readonly id: string; compact?(layer: string, additional?: readonly string[]): Promise<void>; readonly finishedAtMs?: number; check(check: LiveCheck): void; flush(): Promise<void>; finish(status?: 'completed' | 'interrupted', reason?: string): Promise<void> };
 
 /**
  * Start publishing immediately, batch changing checks, and send independent heartbeats while the producer is alive.
@@ -47,9 +47,10 @@ export function createLiveReporter(identity: LiveIdentity, options: LiveReporter
         const response = await fetch(endpoint + suffix, { method, redirect: 'error', signal: AbortSignal.timeout(options.timeoutMs ?? 10_000),
           headers: { ...extraHeaders, 'content-type': 'application/json', ...(options.project ? { 'x-atlas-project': options.project } : {}), ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) }, body: text });
         const status = response.status;
+        if (response.status === 404 && suffix === '/compact') { await response.body?.cancel(); return {}; }
         const json = response.headers.get('content-type')?.includes('application/json');
         if (response.ok && !json) { await response.body?.cancel(); throw Object.assign(new Error('Atlas live reporter: the endpoint is not an Atlas server. Start or restart the Atlas server.'), { permanent: true }); }
-        if (!response.ok) { await response.body?.cancel(); throw Object.assign(new Error(`Atlas live reporter: HTTP ${status}`), { permanent: status < 500 && status !== 429 }); }
+        if (!response.ok) { await response.body?.cancel(); throw Object.assign(new Error(`Atlas live reporter: HTTP ${status}`), { status, permanent: status < 500 && status !== 429 }); }
         return await response.json() as { finishedAtMs?: number };
       } catch (caught) {
         if (attempt >= 2 || (caught as { permanent?: boolean }).permanent) throw caught;
@@ -71,7 +72,16 @@ export function createLiveReporter(identity: LiveIdentity, options: LiveReporter
           checks.forEach(check => pending.delete(check.id));
           failed = { sequence: sequence + 1, checks };
         }
-        await request('PATCH', failed);
+        try {
+          await request('PATCH', failed);
+        } catch (error) {
+          if ((error as { status?: number }).status !== 413 || failed.checks.length < 2) throw error;
+          const split = Math.ceil(failed.checks.length / 2);
+          for (const deferred of failed.checks.splice(split)) {
+            if (!pending.has(deferred.id)) pending.set(deferred.id, deferred);
+          }
+          continue;
+        }
         sequence = failed.sequence;
         failed = undefined;
       }
@@ -95,7 +105,7 @@ export function createLiveReporter(identity: LiveIdentity, options: LiveReporter
       timer.unref?.();
     }
   };
-  return { id, get finishedAtMs() { return finishedAtMs; }, check, flush, async finish(status = 'completed', reason) {
+  return { id, async compact(layer, additional) { await request('POST', { layer, ...(additional?.length ? { additional } : {}) }, '/compact'); }, get finishedAtMs() { return finishedAtMs; }, check, flush, async finish(status = 'completed', reason) {
     if (closed) { await queue; if (error) throw error; return; }
     const unfinished = [...known.values()].filter(check => check.status === 'running');
     if (unfinished.length) {

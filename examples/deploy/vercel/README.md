@@ -1,6 +1,6 @@
 # Atlas on Vercel
 
-The Atlas server, viewer and API, as one Vercel function, with results in a private Vercel Blob store. There is no
+A static viewer served by the Vercel CDN and an Atlas API function, with results in a private Vercel Blob store. There is no
 container, bucket or proxy to run, and CI publishes with no secret.
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fcrvouga%2Fatlas%2Ftree%2Fmain%2Fexamples%2Fdeploy%2Fvercel&project-name=atlas&repository-name=atlas&env=ATLAS_TOKEN,ATLAS_READ_TOKEN&envDescription=Two%20long%20random%20strings%20(openssl%20rand%20-hex%2024)%3A%20the%20admin%20token%2C%20and%20the%20token%20people%20sign%20in%20with%20to%20look%20at%20results&envLink=https%3A%2F%2Fgithub.com%2Fcrvouga%2Fatlas%2Fblob%2Fmain%2Fdocs%2Fdeploying.md%23vercel&stores=%5B%7B%22type%22%3A%22blob%22%7D%5D)
@@ -54,10 +54,10 @@ thing: bump `@crvouga/atlas` in `package.json`.
 
 ## Notes
 
-- **Sign-in.** Keep Vercel Authentication off for the production domain, which is Vercel's default. With it on, CI
-  would need Vercel's bypass secret as well (`ATLAS_HEADERS='x-vercel-protection-bypass=…'`). Atlas's own tokens decide
+- **Sign-in.** Enable Vercel Authentication to protect the viewer and API together. When protection is enabled, CI
+  needs the deployment bypass secret (`ATLAS_HEADERS='x-vercel-protection-bypass=…'`). Atlas's own tokens decide
   who may look.
-- **Garbage collection** is off until a policy is saved. The daily `/api/cron` run applies it once `CRON_SECRET` is set
+- **Garbage collection** uses the deployment policy, or the saved policy when one exists. It is off by default. The daily `/api/cron` run applies it once `CRON_SECRET` is set
   in the project; Vercel Cron sends it. Save the policy at `/admin` with the admin token: the build prebuilds that page.
 - **Live updates** come over a stream that the server ends every 4 minutes, before Vercel's time limit; the viewer
   reconnects on its own.

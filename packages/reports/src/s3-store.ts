@@ -15,7 +15,7 @@
 import { XMLParser } from 'fast-xml-parser';
 
 import { credentialChain, staticCredentials, type CredentialProvider } from './aws-credentials';
-import type { ObjectStore, PagedListing, SignedDownloads, StoredObject } from './object-store';
+import type { ConditionalWrites, ObjectStore, PagedListing, SignedDownloads, StagedUploads, StoredObject } from './object-store';
 import { amzDate, presignUrl, sha256Hex, signRequest, uriEncode, type Credentials } from './sigv4';
 import { ObjectStoreWithPrefix } from './store-prefix';
 
@@ -114,7 +114,7 @@ class Gate {
 }
 
 /** An `ObjectStore` on S3 with paged listing, a secret-free label, and diagnostics. */
-export type S3Store = ObjectStore & PagedListing & SignedDownloads & {
+export type S3Store = ObjectStore & ConditionalWrites & PagedListing & SignedDownloads & StagedUploads & {
   /** A description with no secrets: `s3://bucket/prefix (us-east-1)`. */
   readonly label: string;
   /** Where the credentials came from, once a request has been made. */
@@ -178,7 +178,7 @@ export function s3Store(options: S3StoreOptions): S3Store {
     return url;
   }
 
-  async function request(method: string, key: string, init: { query?: [string, string][]; body?: Uint8Array; contentType?: string; allow404?: boolean } = {}): Promise<Response | null> {
+  async function request(method: string, key: string, init: { query?: [string, string][]; body?: Uint8Array; contentType?: string; allow404?: boolean; expected?: string | null } = {}): Promise<Response | null> {
     let refreshed = false;
     let redirected = false;
     for (let attempt = 0; ; attempt++) {
@@ -190,7 +190,7 @@ export function s3Store(options: S3StoreOptions): S3Store {
       const { datetime } = amzDate(at);
       const headers = await signRequest({
         method, url, payloadHash, credentials, region, service: 's3', at,
-        headers: { 'x-amz-content-sha256': payloadHash, 'x-amz-date': datetime, ...(credentials.sessionToken ? { 'x-amz-security-token': credentials.sessionToken } : {}) }
+        headers: { ...(init.expected === null ? { 'if-none-match': '*' } : init.expected !== undefined ? { 'if-match': init.expected } : {}), 'x-amz-content-sha256': payloadHash, 'x-amz-date': datetime, ...(credentials.sessionToken ? { 'x-amz-security-token': credentials.sessionToken } : {}) }
       });
       if (init.contentType) headers['content-type'] = init.contentType;
       let response: Response | null = null;
@@ -213,7 +213,7 @@ export function s3Store(options: S3StoreOptions): S3Store {
         failure = new S3Error(`${where}: cannot reach ${url.host} (${reason})`, null, null, true);
       }
       if (response) {
-        if (response.ok) return response;
+        if (response.ok || (init.expected !== undefined && response.status === 412)) return response;
         const text = method === 'HEAD' ? '' : await response.text().catch(() => '');
         const { code, message } = parseError(text);
         // A missing key is an answer. A missing bucket is a mistake, and says so.
@@ -245,7 +245,7 @@ export function s3Store(options: S3StoreOptions): S3Store {
     async get(key): Promise<StoredObject | null> {
       const response = await request('GET', base + key, { allow404: true });
       if (!response) return null;
-      return { body: response.body ?? new Blob([]).stream(), contentType: response.headers.get('content-type') ?? 'application/octet-stream', size: Number(response.headers.get('content-length') ?? 0) };
+      return { etag: response.headers.get('etag') ?? undefined, body: response.body ?? new Blob([]).stream(), contentType: response.headers.get('content-type') ?? 'application/octet-stream', size: Number(response.headers.get('content-length') ?? 0) };
     },
 
     async put(key, bytes, contentType) {
@@ -274,6 +274,22 @@ export function s3Store(options: S3StoreOptions): S3Store {
     async getUri(key) {
       if (!(await store.head(key))) return null;
       return presignUrl({ url: urlFor(base + key), credentials: await provider(), region, service: 's3', at: now(), expiresSeconds: 3600 });
+    },
+
+    async stagedUploadTarget(key, upload) {
+      const at = now();
+      const url = await presignUrl({ url: urlFor(base + key), credentials: await provider(), region, service: 's3', at, expiresSeconds: 300, upload });
+      return { method: 'PUT', url, expiresAt: new Date(at.getTime() + 300_000).toISOString(), headers: { 'content-length': String(upload.size), 'content-type': upload.contentType } };
+    },
+
+    async putIfAbsent(key, bytes, contentType) {
+      return store.putConditional(key, bytes, contentType, null);
+    },
+
+    async putConditional(key, bytes, contentType, expected) {
+      const response = await request('PUT', base + key, { body: bytes, contentType, expected });
+      await response!.body?.cancel();
+      return response!.ok;
     },
 
     async signedUrl(key, options) {

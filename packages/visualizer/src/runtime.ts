@@ -17,8 +17,14 @@ export type RuntimeConfig = {
 /** The project selected in the page address. A full navigation on change isolates caches and connections. */
 export const currentProject = () => typeof window === 'undefined' ? null : new URL(window.location.href).searchParams.get('project');
 
+function baseConfig(): RuntimeConfig | undefined {
+  const page = (globalThis as { __ATLAS_CONFIG__?: RuntimeConfig }).__ATLAS_CONFIG__;
+  const api = import.meta.env?.VITE_ATLAS_API_BASE as string | undefined;
+  return page ?? (api ? { api, reportsUrl: api + '/reports', dataUrl: api + '/data/', eventsUrl: api + '/events', projectsUrl: api + '/projects', effective: true, catalogIndex: true } : undefined);
+}
+
 export const runtimeConfig = (): RuntimeConfig | undefined => {
-  const config = (globalThis as { __ATLAS_CONFIG__?: RuntimeConfig }).__ATLAS_CONFIG__;
+  const config = baseConfig();
   const project = currentProject();
   if (!config?.api || !project || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(project) || project.length > 64) return config;
   const api = new URL(config.api, window.location.href).href.replace(/\/$/, '');
@@ -38,6 +44,6 @@ export function runtimeUrl(value: string | undefined): string | undefined {
 
 /** `GET /api/server` of the server that served this page, which is the same for every project; undefined without a server. */
 export function serverInfoUrl(): string | undefined {
-  const api = (globalThis as { __ATLAS_CONFIG__?: RuntimeConfig }).__ATLAS_CONFIG__?.api;
+  const api = baseConfig()?.api;
   return api && typeof window !== 'undefined' ? `${new URL(api, window.location.href).href.replace(/\/$/, '')}/server` : undefined;
 }

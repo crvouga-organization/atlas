@@ -9,7 +9,8 @@ export const BLOB_TOKEN = 'vercel_blob_rw_teststore_secretpart';
 export const BLOB_API = 'https://blob-api.test/api/blob';
 export const BLOB_CONTENT = 'https://teststore.private.blob.vercel-storage.com';
 
-type Stored = { bytes: Uint8Array; contentType: string };
+let version = 0;
+type Stored = { etag?: string; bytes: Uint8Array; contentType: string };
 
 export function fakeVercelBlob(options: { token?: string; /** A public store refuses private writes, as the service does. */ access?: 'private' | 'public'; /** The longest delegation `POST /signed-token` grants. Default an hour. */ maxDelegationMs?: number } = {}) {
   const token = options.token ?? BLOB_TOKEN;
@@ -26,7 +27,7 @@ export function fakeVercelBlob(options: { token?: string; /** A public store ref
   /** The stored bytes, or one `bytes=a-b` range of them. */
   const serve = (stored: Stored, range: string | undefined) => {
     const match = /^bytes=(\d+)-(\d*)$/.exec(range ?? '');
-    if (!match) return new Response(stored.bytes.slice(), { headers: { 'content-type': stored.contentType, 'content-length': String(stored.bytes.length) } });
+    if (!match) return new Response(stored.bytes.slice(), { headers: { etag: stored.etag ?? '', 'content-type': stored.contentType, 'content-length': String(stored.bytes.length) } });
     const start = Number(match[1]), end = match[2] ? Math.min(Number(match[2]), stored.bytes.length - 1) : stored.bytes.length - 1;
     return new Response(stored.bytes.slice(start, end + 1), { status: 206, headers: { 'content-type': stored.contentType, 'content-range': `bytes ${start}-${end}/${stored.bytes.length}` } });
   };
@@ -88,11 +89,12 @@ export function fakeVercelBlob(options: { token?: string; /** A public store ref
       if (client && client.pathname !== pathname) return error(400, 'bad_request', 'The "pathname" does not match the token payload');
       if (client?.allowedContentTypes && !client.allowedContentTypes.includes(headers['x-content-type'] ?? '')) return error(400, 'bad_request', 'contentType is not allowed');
       if (headers['x-add-random-suffix'] !== '0') pathname = pathname.replace(/(\.[^./]*)?$/, `-${Math.random().toString(36).slice(2, 8)}$1`);
-      if (objects.has(pathname) && headers['x-allow-overwrite'] !== '1') return error(400, 'bad_request', 'This blob already exists');
       const bytes = new Uint8Array(await new Response(init.body as BodyInit).arrayBuffer());
+      if (objects.has(pathname) && headers['x-allow-overwrite'] !== '1') return error(400, 'bad_request', 'This blob already exists');
+      if (headers['x-if-match'] && headers['x-if-match'] !== objects.get(pathname)?.etag) return error(412, 'precondition_failed');
       if (client?.maximumSizeInBytes !== undefined && bytes.length > client.maximumSizeInBytes) return error(400, 'bad_request', 'the file length cannot be greater than the maximum');
       uploadsWithClientToken += client ? 1 : 0;
-      objects.set(pathname, { bytes, contentType: headers['x-content-type'] ?? 'application/octet-stream' });
+      objects.set(pathname, { etag: String(++version), bytes, contentType: headers['x-content-type'] ?? 'application/octet-stream' });
       return json(200, { url: `${BLOB_CONTENT}/${pathname}`, pathname, contentType: headers['x-content-type'] });
     }
     if (method === 'POST' && route === '/signed-token') {

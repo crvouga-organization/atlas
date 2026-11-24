@@ -219,7 +219,7 @@ export async function runConfig<C>(config: AtlasConfig<C>, options: RunCommandOp
   let live: LiveReporter | undefined;
   const onProgress = reporting ? (manifest: import('./run/execute').Manifest) => {
     if (!manifest.privacy.passed) return;
-    live ??= createLiveReporter({ producer: process.env.ATLAS_PRODUCER ?? 'atlas-statecharts', title: `${prepared.scope.chart} · ${options.mode ?? 'fast'}`,
+    live ??= createLiveReporter({ compactOnFinish: true, producer: process.env.ATLAS_PRODUCER ?? 'atlas-statecharts', title: `${prepared.scope.chart} · ${options.mode ?? 'fast'}`,
       plannedChecks: paths.length, environment: process.env.ATLAS_ENVIRONMENT ?? 'desktop-web', branch: manifest.run.branch ?? undefined, sha: manifest.run.commit ?? undefined }, reporting);
     const ingested = checksFromManifest(manifest);
     ingested.checks.forEach((check, index) => {
@@ -245,8 +245,9 @@ export async function runConfig<C>(config: AtlasConfig<C>, options: RunCommandOp
   await live?.finish(outcome.manifest.privacy.passed ? 'completed' : 'interrupted', outcome.manifest.privacy.passed ? undefined : 'Run failed its privacy scan; unsafe progress was withheld.');
   if (reporting && outcome.manifest.privacy.passed) {
     const store = httpStore({ url: reporting.url, project: reporting.project, token: reporting.token });
-    await publishChecks(store, { producer: process.env.ATLAS_PRODUCER ?? 'atlas-statecharts', environment: process.env.ATLAS_ENVIRONMENT ?? 'desktop-web',
+    const finalLayer = await publishChecks(store, { ...(live ? { run: { id: live.id } } : {}), producer: process.env.ATLAS_PRODUCER ?? 'atlas-statecharts', environment: process.env.ATLAS_ENVIRONMENT ?? 'desktop-web',
       branch: outcome.manifest.run.branch, sha: outcome.manifest.run.commit, recordedAtMs: Math.max(Date.now(), (live?.finishedAtMs ?? 0) + 1), checks: checksFromManifest(outcome.manifest).checks.map(check => ({ ...check, measurements: [...check.measurements] })) });
+    await live?.compact?.(finalLayer.id);
     await publishRunBundle(store, outcome.runDir);
   }
   return outcome;

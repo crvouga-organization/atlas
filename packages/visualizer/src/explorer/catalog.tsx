@@ -49,6 +49,8 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useLocation } from '@tanstack/react-router';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
+import { useLiveStatus } from '../live/live-stream';
+import { explorerSearch, queryOf } from './search';
 import { reportJson, ReportsError } from '../evidence/api';
 import { useEvidence } from '../evidence/evidence-context';
 
@@ -65,6 +67,7 @@ const PAGE_REBUILD_MS = 300;
 
 /** What the explorer reads its tests from. */
 export type CatalogState = {
+  readonly page?: { offset: number; limit: number; total: number; counts: TestCatalog['filterCounts']; go(offset: number): void; loadFull(): void };
   /** Every test, with live progress applied; null until there is something to show. */
   readonly model: CatalogModel | null;
   /** `server`: the server's catalog and history. `page`: built from the layers this page read. */
@@ -189,17 +192,48 @@ function usePageHistory(layers: readonly LayerEvidence[] | null): PageHistory | 
 }
 
 /** Reads the catalog for everything below it: from the server when it has one, else from the page. */
-export function TestCatalogProvider({ children }: { children: ReactNode }) {
+export function TestCatalogProvider({ children, loadFull }: { children: ReactNode; loadFull?: () => void }) {
   const evidence = useEvidence();
   const { pathname, search } = useLocation();
   const enabled = evidence.ready && ((pathname === '/' && search.view === 'tests') || !evidence.files.some(isStatechartFile));
+  const stream = useLiveStatus();
+  const filters = explorerSearch(search);
+  const params = new URLSearchParams({ limit: '100', counts: '1' });
+  for (const [key, value] of Object.entries(queryOf(filters))) {
+    if (key === 'q') continue;
+    if (Array.isArray(value)) value.forEach(item => params.append(key, item));
+    else if (value !== undefined) params.set(key, value === true ? '1' : String(value));
+  }
+  if (filters.video || filters.q?.includes('has:video')) params.set('has', 'video');
+  const typedStatus = filters.q?.split(/\s+/).filter(token => token.startsWith('status:')).map(token => token.slice(7));
+  if (typedStatus?.length) {
+    const chosen = params.getAll('status');
+    params.delete('status');
+    const matches = chosen.length ? typedStatus.filter(status => chosen.includes(status)) : typedStatus;
+    for (const status of matches.length ? matches : ['(none)']) params.append('status', status);
+  }
+  const filterKey = params.toString();
+  const [position, setPosition] = useState<{ filterKey: string; offset: number; cursor?: string }>({ filterKey: '', offset: 0 });
+  const offset = position.filterKey === filterKey ? position.offset : 0;
+  const paged = useQuery({
+    queryKey: ['test-pages', filterKey, offset, offset ? position.cursor : null],
+    queryFn: ({ signal }) => reportJson<TestCatalog>(`/tests?${filterKey}&offset=${offset}${offset && position.cursor ? '&cursor=' + encodeURIComponent(position.cursor) : ''}`, signal),
+    enabled: enabled && evidence.browsingTests === true,
+    retry: (count, error) => error instanceof ReportsError && error.status === 503 && count < 30,
+    refetchInterval: evidence.browsingTests ? (stream === 'live' ? 60_000 : 10_000) : false
+  });
+  useEffect(() => {
+    if (!evidence.browsingTests) return;
+    if (paged.isError || (paged.data && !paged.data.filterCounts)) loadFull?.();
+    else if (offset && paged.data && !paged.data.tests.length) setPosition({ filterKey, offset: 0 });
+  }, [paged.data, paged.isError, evidence.browsingTests, offset, filterKey, loadFull]);
   const version = useThrottled(evidence.version, SERVER_REREAD_MS);
   // A server without the catalog routes (an older one) answers 404: stop asking until the page is reloaded.
   const [unsupported, setUnsupported] = useState(false);
   const server = useQuery({
     queryKey: ['test-catalog', version],
     queryFn: ({ signal }) => reportJson<TestCatalog>('/tests?limit=20000', signal),
-    enabled: enabled && evidence.effective && version !== null && !unsupported,
+    enabled: enabled && !evidence.browsingTests && evidence.effective && version !== null && !unsupported,
     placeholderData: keepPreviousData,
     staleTime: Number.POSITIVE_INFINITY,
     // A server still starting answers 503: ask again shortly. Any other answer (an older server has no such route) is final.
@@ -209,10 +243,11 @@ export function TestCatalogProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (server.error instanceof ReportsError && server.error.status === 404) setUnsupported(true);
   }, [server.error]);
-  const fromServer = evidence.effective && !unsupported && server.data !== undefined;
+  const document = evidence.browsingTests ? paged.data : server.data;
+  const fromServer = evidence.effective && !unsupported && document !== undefined;
   const layers = useThrottled(evidence.evidence, PAGE_REBUILD_MS);
-  const page = usePageHistory(enabled && !fromServer ? layers : null);
-  const serverModel = useMemo(() => (server.data ? modelFromCatalog(server.data) : null), [server.data]);
+  const page = usePageHistory(enabled && !fromServer && !evidence.browsingTests ? layers : null);
+  const serverModel = useMemo(() => (document ? modelFromCatalog(document) : null), [document]);
   const pageModel = useMemo(
     () => (page ? catalogModel(layers, { history: page.history, specs: evidence.specs, version: page.stamp }) : null),
     // `page.stamp` changes exactly when the history (and so the layers in it) does.
@@ -222,8 +257,9 @@ export function TestCatalogProvider({ children }: { children: ReactNode }) {
   const model = useMemo(() => (base ? withLiveProgress(base, evidence.view) : null), [base, evidence.view]);
   const state: CatalogState = {
     model,
+    ...(evidence.browsingTests && document ? { page: { offset: document.offset, limit: document.limit, total: document.total, counts: document.filterCounts, go: (offset: number) => setPosition({ filterKey, offset, cursor: offset === document.offset + document.limit ? document.nextCursor : undefined }), loadFull: () => loadFull?.() } } : {}),
     source: fromServer ? 'server' : 'page',
-    version: fromServer ? `server:${server.data!.version}:${version ?? ''}` : page?.stamp ?? 'none',
+    version: fromServer ? `server:${document!.version}:${version ?? ''}` : page?.stamp ?? 'none',
     notice: evidence.effective && server.isError && !(server.error instanceof ReportsError && server.error.status === 404) ? server.error.message : null
   };
   return <CatalogContext.Provider value={state}>{children}</CatalogContext.Provider>;

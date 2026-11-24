@@ -13,21 +13,8 @@ import { z } from 'zod/v4';
 
 import { ServerEditableSettingsSchema } from './server-config';
 
-/**
- * The garbage collection policy: which report layers the server may delete from S3, and when. Only layers that the
- * report has loaded and that no longer decide any result (every check they carry has since been superseded by a newer
- * layer) are ever candidates, and the newest `keepLatest` layers are always kept. With `enabled: false` nothing is deleted.
- */
-export const GcPolicySchema = z.strictObject({
-  enabled: z.boolean().describe('Delete eligible layers on a schedule. `false` keeps the policy but deletes nothing'),
-  maxAgeDays: z.number().int().min(1).max(3650).describe('A superseded layer is eligible once it was recorded more than this many days ago'),
-  keepLatest: z.number().int().min(0).max(1_000_000).default(20).describe('Always keep this many of the newest layers, however old, so recent history stays'),
-  intervalHours: z.number().min(1).max(720).default(24).describe('How often the server applies the policy')
-});
-/** A garbage collection policy as stored, defaults applied. */
-export type GcPolicy = z.output<typeof GcPolicySchema>;
-/** A garbage collection policy as written, before defaults are applied. */
-export type GcPolicyInput = z.input<typeof GcPolicySchema>;
+import { GcPolicySchema } from './gc-policy';
+export { GcPolicySchema, type GcPolicy, type GcPolicyInput } from './gc-policy';
 
 /** What one pass of garbage collection found and did, for one project. */
 export const GcRunSchema = z.looseObject({
@@ -39,6 +26,7 @@ export const GcRunSchema = z.looseObject({
   deletedBlobs: z.number().int().min(0),
   keptLayers: z.number().int().min(0),
   error: z.string().optional().describe('Why the pass stopped early, when it did'),
+  strippedLayers: z.number().int().nonnegative().optional().describe('Retained layers with newly expired attachment files, including planned expiry in a dry run'),
   candidateBlobs: z.number().int().min(0).optional().describe('Captured-file blobs only the deleted layers used: what a real pass deletes (and did delete, unless a layer could not be read). The same in a dry run. Absent from a server that predates it'),
   candidateBytes: z.number().int().min(0).optional().describe('Bytes of those blobs and of the deleted layers\' manifests: what a real pass frees. The same in a dry run'),
   deletedBytes: z.number().int().min(0).optional().describe('Bytes a real pass removed; 0 for a dry run')
@@ -56,13 +44,14 @@ export const UserStateSchema = z.looseObject({
 export type UserState = z.output<typeof UserStateSchema>;
 
 /**
- * `GET /api/settings/gc` and `PUT /api/settings/gc`: the policy as saved in S3 (`null` when none has been saved), the
+ * `GET /api/settings/gc` and `PUT /api/settings/gc`: the effective deployment or saved policy (`null` when neither exists), the
  * revision to send back in `If-Match`, and the result of the last pass this server ran.
  */
 export const GcSnapshotSchema = z.looseObject({
   revision: z.string().regex(/^[a-f0-9]{64}$/),
   policy: GcPolicySchema.nullable(),
-  saved: z.boolean().describe('Whether a policy exists in S3. `false` means garbage collection is off: nothing is deleted'),
+  source: z.enum(['env', 'config', 'saved', 'none']).optional().describe('Where the effective policy came from'),
+  saved: z.boolean().describe('Whether a policy exists in S3'),
   lastRuns: z.array(GcRunSchema).describe('The most recent pass over each project, newest first; empty before the first pass'),
   stateKey: z.string().describe('Where the user state lives in the bucket, relative to the configured prefix'),
   currentPass: z.lazy(() => GcPassSchema).nullable().optional().describe('The pass running now, or null. Absent from a server that predates passes')

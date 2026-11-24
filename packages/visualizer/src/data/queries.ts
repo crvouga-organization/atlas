@@ -1,3 +1,5 @@
+import { useLiveStatus, eventsAddress } from '../live/live-stream';
+import { runtimeUrl } from '../runtime';
 import { liveInvalidator } from '../live/live-query';
 import type { DataIssue } from '@crvouga/atlas/schema';
 import { useContext, useEffect, useMemo } from 'react';
@@ -170,6 +172,7 @@ export function useAtlasData(runParam: string | undefined, live = true): AtlasDa
   const entries = useBackends();
   const client = useQueryClient();
   const source = specKey(adapter);
+  const streaming = useLiveStatus() === 'live';
   const specIndex = useQuery({
     queryKey: keys.specIndex(source),
     queryFn: async () => SpecIndexSchema.parse(await adapter.specIndex()),
@@ -191,7 +194,7 @@ export function useAtlasData(runParam: string | undefined, live = true): AtlasDa
     combine: combineFiles
   });
   const indexes = useQueries({
-    queries: entries.map(({ backend, enabled }) => ({
+    queries: entries.map(({ backend, enabled, config }) => ({
       queryKey: keys.runsIndex(backend.cacheKey),
       queryFn: async () => {
         const raw = await backend.runsIndex();
@@ -199,7 +202,7 @@ export function useAtlasData(runParam: string | undefined, live = true): AtlasDa
         return raw;
       },
       enabled,
-      refetchInterval: live && enabled ? backend.pollMs : false,
+      refetchInterval: live && enabled ? (streaming && backend.subscribe && (!config.eventsUrl || runtimeUrl(config.eventsUrl) === eventsAddress()) ? Math.max(60_000, backend.pollMs) : backend.pollMs) : false,
       refetchOnWindowFocus: live && enabled ? ('always' as const) : (false as const)
     }))
   });

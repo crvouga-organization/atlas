@@ -28,15 +28,16 @@ async function layersOf(store: ReturnType<typeof storeOn>, days: number[]) {
   for (const day of days) await publishChecks(store, { producer: 'suite', recordedAtMs: day * DAY, checks: [{ id: 'login', title: 'login', status: 'passed', attachments: [{ name: 'log.txt', text: `day ${day} `.repeat(3000) }] }] });
 }
 
-async function setup(options: { gcCheckMs?: number; days?: number[]; gcWaitMs?: number; gcBudgetMs?: number; slowMs?: number; s3?: ReturnType<typeof fakeS3> } = {}) {
+async function setup(options: { env?: Record<string, string>; gcCheckMs?: number; days?: number[]; gcWaitMs?: number; gcBudgetMs?: number; slowMs?: number; s3?: ReturnType<typeof fakeS3> } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'atlas-gc-'));
   dirs.push(dir);
   const s3 = options.s3 ?? fakeS3();
   if (!options.s3) await layersOf(storeOn(s3), options.days ?? [1, 2, 3, 4]);
   // A store that answers slowly, so a pass is still running when it is asked about.
   const served = options.slowMs ? { ...s3, fetch: (async (input: RequestInfo | URL, init?: RequestInit) => { await new Promise(resolve => setTimeout(resolve, options.slowMs)); return s3.fetch(input, init); }) as typeof s3.fetch } : s3;
-  const config = loadServerConfig([], S3_TEST_ENV, dir, () => '{}');
-  const { settings, gc } = storedSettings(config, [], S3_TEST_ENV, dir, userStateStore(storeOn(served)));
+  const env = { ...S3_TEST_ENV, ...options.env };
+  const config = loadServerConfig([], env, dir, () => '{}');
+  const { settings, gc } = storedSettings(config, [], env, dir, userStateStore(storeOn(served)));
   const app = createAtlasServer({
     backends: [{ id: 's3', store: storeOn(served) }], write: 's3', settings, gc, now: () => NOW, refreshMs: 60_000,
     tokens: [{ name: 'admin', role: 'admin', token: 'admin-token-123' }, { name: 'ci', role: 'publish', token: 'publish-token-123' }],
@@ -63,6 +64,14 @@ describe('the garbage collection policy', () => {
     expect(run.status).toBe(409);
     expect((await run.json()).detail).toContain('No garbage collection policy has been saved yet');
     expect((await layerKeys()).length).toBe(4);
+    expect(s3.text(USER_STATE_KEY)).toBeNull();
+  });
+
+  test('an environment retention policy collects before the first save and keeps the current winner', async () => {
+    const { read, app, layerKeys, s3 } = await setup({ env: { ATLAS_GC_MAX_AGE_DAYS: '3', ATLAS_GC_KEEP_LATEST: '1' } });
+    expect(await read()).toMatchObject({ saved: false, source: 'env', policy: { enabled: true, maxAgeDays: 3 } });
+    expect((await app.maintain!('gc')).gc).toMatchObject([{ project: 'default', deletedLayers: 3 }]);
+    expect(await layerKeys()).toHaveLength(1);
     expect(s3.text(USER_STATE_KEY)).toBeNull();
   });
 
@@ -269,6 +278,23 @@ describe('garbage collection passes', () => {
     expect([...s3.objects.keys()].filter(key => key.startsWith(`server/gc/runs/${id}/`))).toEqual([]);
     const effective = await (await a.call('GET', '/api/reports/evidence/effective')).json();
     expect(effective.layers.length).toBe(1);
+  });
+
+  test('concurrent bounded workers share one pass and preserve the winning layer', async () => {
+    const s3 = fakeS3();
+    await layersOf(storeOn(s3), [1, 2, 3, 4]);
+    const workers = await Promise.all([setup({ s3, gcBudgetMs: 0 }), setup({ s3, gcBudgetMs: 0 })]);
+    await workers[0]!.save(POLICY);
+    const start = await Promise.all(workers.map(async worker => (await (await worker.call('POST', '/api/settings/gc/run')).json()) as Pass));
+    const id = start[0]!.id;
+    expect(start[1]!.id).toBe(id);
+    let pass = start[0]!;
+    for (let attempt = 0; attempt < 50 && pass.status === 'running'; attempt++) {
+      const states = await Promise.all(workers.map(async worker => (await (await worker.call('GET', `/api/settings/gc/runs/${id}`)).json()) as Pass));
+      pass = states.find(state => state.status === 'done') ?? states[0]!;
+    }
+    expect(pass).toMatchObject({ status: 'done', runs: [{ deletedLayers: 3 }] });
+    expect(await workers[0]!.layerKeys()).toHaveLength(1);
   });
 
   test('a scheduled pass on a bounded host carries on a pass that is under way', async () => {

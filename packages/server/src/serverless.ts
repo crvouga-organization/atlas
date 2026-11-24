@@ -89,7 +89,7 @@ export function createAtlasHandler(options: AtlasHandlerOptions = {}): AtlasHand
       if (error instanceof S3ConfigError || error instanceof ConfigError) return { failure: error.message };
       throw error;
     }
-    if (!config.tokens.length && !config.trustedPublishers.length && !config.insecure) {
+    if (!config.tokens.length && !config.trustedPublishers.length) {
       return { failure: 'Atlas will not serve without tokens: anyone could administer it. Set ATLAS_TOKEN to a long random admin token (openssl rand -hex 24), and ATLAS_READ_TOKEN for people who only look (or ATLAS_ANONYMOUS_READ=1).\n' };
     }
     // Proven usable (list, write, read back, delete) before anything is served, as `atlas serve` does: a wrong token or a
@@ -141,19 +141,22 @@ export function createAtlasHandler(options: AtlasHandlerOptions = {}): AtlasHand
       url.searchParams.delete(PATH_PARAM);
       request = new Request(url, request);
     }
-    if (url.pathname === '/api/cron') return cron(request, started.server, started.config);
+    if (['/api/cron', '/api/cron/maintain', '/api/cron/gc'].includes(url.pathname)) {
+      if (request.method !== 'GET') return new Response(null, { status: 405, headers: { allow: 'GET' } });
+      return cron(request, started.server, started.config, url.pathname === '/api/cron' ? 'all' : url.pathname.endsWith('/gc') ? 'gc' : 'maintain');
+    }
     return started.server.fetch(request);
   }) as AtlasHandler;
 
   /** The scheduled pass, for the host's scheduler: with `CRON_SECRET` (which Vercel Cron sends) or the admin token. */
-  async function cron(request: Request, server: AtlasServer, config: ResolvedServerConfig): Promise<Response> {
+  async function cron(request: Request, server: AtlasServer, config: ResolvedServerConfig, task: 'all' | 'maintain' | 'gc'): Promise<Response> {
     const header = request.headers.get('authorization') ?? '';
     const presented = header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : '';
     const secrets = [env.CRON_SECRET?.trim(), ...config.tokens.filter(token => token.role === 'admin').map(token => token.token)].filter((value): value is string => Boolean(value));
     if (!presented || !secrets.some(secret => same(secret, presented))) {
       return Response.json({ error: 'The scheduled pass needs CRON_SECRET (Vercel Cron sends it) or the admin token, as Authorization: Bearer.' }, { status: 401, headers: { 'cache-control': 'no-store' } });
     }
-    const result = await server.maintain!();
+    const result = await server.maintain!(task);
     return Response.json({ ok: true, ...result }, { headers: { 'cache-control': 'no-store' } });
   }
 

@@ -22,6 +22,65 @@
               "maximum": 3650,
               "description": "A superseded layer is eligible once it was recorded more than this many days ago"
             },
+            "maxBytes": {
+              "description": "Project storage budget in bytes or decimal units such as 10GB. Above budget the oldest eligible layers may be collected before their age limit.",
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "string",
+                  "pattern": "^[1-9]\\d*(?:KB|MB|GB|TB)$"
+                }
+              ]
+            },
+            "attachments": {
+              "description": "Expire captured attachments of superseded layers independently from their result history. The first matching rule sets the age. Protected statuses take precedence.",
+              "type": "object",
+              "properties": {
+                "maxAgeDays": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "keepForStatus": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "rules": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "role": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string"
+                      },
+                      "branch": {
+                        "type": "string"
+                      },
+                      "maxAgeDays": {
+                        "type": "number",
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "maxAgeDays"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "maxAgeDays"
+              ],
+              "additionalProperties": false
+            },
             "keepLatest": {
               "default": 20,
               "description": "Always keep this many of the newest layers, however old, so recent history stays",
@@ -48,9 +107,19 @@
         }
       ]
     },
+    "source": {
+      "description": "Where the effective policy came from",
+      "type": "string",
+      "enum": [
+        "env",
+        "config",
+        "saved",
+        "none"
+      ]
+    },
     "saved": {
       "type": "boolean",
-      "description": "Whether a policy exists in S3. `false` means garbage collection is off: nothing is deleted"
+      "description": "Whether a policy exists in S3"
     },
     "lastRuns": {
       "type": "array",
@@ -91,6 +160,12 @@
           "error": {
             "description": "Why the pass stopped early, when it did",
             "type": "string"
+          },
+          "strippedLayers": {
+            "description": "Retained layers with newly expired attachment files, including planned expiry in a dry run",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           },
           "candidateBlobs": {
             "description": "Captured-file blobs only the deleted layers used: what a real pass deletes (and did delete, unless a layer could not be read). The same in a dry run. Absent from a server that predates it",
@@ -284,6 +359,12 @@
                   "error": {
                     "description": "Why the pass stopped early, when it did",
                     "type": "string"
+                  },
+                  "strippedLayers": {
+                    "description": "Retained layers with newly expired attachment files, including planned expiry in a dry run",
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
                   },
                   "candidateBlobs": {
                     "description": "Captured-file blobs only the deleted layers used: what a real pass deletes (and did delete, unless a layer could not be read). The same in a dry run. Absent from a server that predates it",
