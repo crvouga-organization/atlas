@@ -271,6 +271,11 @@ What changes on a function host, and what does not:
 - **Large files go straight to Blob.** A function accepts about 4.5 MB per request, so `GET /api/server` says
   `uploads.directOverBytes` (4 MiB; `ATLAS_DIRECT_UPLOAD_OVER_BYTES`). A publisher sends larger files to Blob with a
   one-time token good for that one key, size and type, and the server checks what arrived as it checks any upload.
+- **Recordings play from Blob.** A browser playing or downloading a run's video, audio or trace zip is sent to the Blob
+  store with a URL that works for five minutes, after its read access was checked, so seeking through a long video costs
+  the function nothing. Pages, SVG, images and anything requested by a script still come through the function, sandboxed.
+  `ATLAS_REDIRECT_DOWNLOADS=0` keeps every byte in the function. Attachments of test results are packed into compressed
+  chunks of several files each, so they are always served by the function.
 - **Live updates** come over a stream the server ends after 4 minutes (`ATLAS_STREAM_MAX_SECONDS`), before the
   function's time limit; the viewer reconnects by itself.
 - **Publishing from CI** needs no token: the template trusts the GitHub account it was deployed into ([trusted

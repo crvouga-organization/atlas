@@ -53,12 +53,12 @@ export type AtlasServerOptions = {
    * store that can make an upload target (Vercel Blob); ignored otherwise.
    */
   readonly directUploadOverBytes?: number;
-  readonly heartbeatMs?: number;
-  /** Producer lease timeout; default 30 seconds. */
-  readonly runTimeoutMs?: number;
-  /** Maximum time without progress; default 15 minutes, 0 disables. */
-  readonly runStallMs?: number;
-  readonly log?: (line: Record<string, unknown>) => void;
+  /**
+   * Send a browser playing or downloading a run's recording (video, audio, a trace zip) straight to the store, with a
+   * `302` to a URL that works for five minutes, when the store can sign one (S3, Vercel Blob). Off: every byte goes
+   * through the server. Worth it where the server is a function billed by the second; a store whose address browsers
+   * cannot reach (a bucket on a private network) must leave it off.
+   */
   …
 ```
 
@@ -834,6 +834,7 @@ and the differences of a function host are handled here:
   than the refresh interval, and `GET /api/cron` does the scheduled work (garbage collection when a policy is due).
 - Any number of instances may run: everything is in the store, and an instance only caches it.
 - Request bodies are small, so large files go straight to storage (Vercel Blob) and the server checks them after.
+- Responses are billed by the second, so a browser playing a run's recording is sent to the store with a five-minute URL.
 - Requests have a maximum duration, so live streams end on their own before it and viewers reconnect.
 - A server with neither tokens nor trusted publishers would let anyone administer it, so it refuses to serve.
 

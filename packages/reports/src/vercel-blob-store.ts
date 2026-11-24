@@ -10,7 +10,7 @@
  * @see docs/deploying.md#vercel-blob
  * @see docs/report-contract.md#backends
  */
-import type { ObjectStore, PagedListing, StoredObject } from './object-store';
+import type { ObjectStore, PagedListing, SignedDownloads, StoredObject } from './object-store';
 import { ObjectStoreWithPrefix } from './store-prefix';
 
 /** How to reach a Blob store. Everything is optional: the token comes from `BLOB_READ_WRITE_TOKEN` by default. */
@@ -48,7 +48,7 @@ export class VercelBlobError extends Error {
 }
 
 /** An `ObjectStore` on Vercel Blob with paged listing, a secret-free label, and a cheap reachability check. */
-export type VercelBlobStore = ObjectStore & PagedListing & {
+export type VercelBlobStore = ObjectStore & PagedListing & SignedDownloads & {
   /** A description with no secrets: `vercel-blob://my-project/ (store abc123)`. */
   readonly label: string;
   /**
@@ -67,6 +67,42 @@ const RETRYABLE_CODES = new Set(['unknown_error', 'service_unavailable', 'intern
 const PAGE = 1000;
 /** Keys per delete request. */
 const DELETE_BATCH = 100;
+
+/** How long a delegation to sign read URLs is asked for. */
+const DELEGATION_MS = 60 * 60_000;
+
+const base64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const utf8 = new TextEncoder();
+
+/** The claims inside a delegation token (`<base64url payload>.<signature>`), or null. */
+function decodePayload(token: string): { validUntil?: number; pathname?: string; operations?: string[] } | null {
+  const part = token.slice(0, Math.max(0, token.indexOf('.')));
+  try { return JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(part.length / 4) * 4, '='))); } catch { return null; }
+}
+
+/** Lines sorted by their UTF-8 bytes, as the Blob service compares them. */
+function byUtf8(a: string, b: string): number {
+  const left = utf8.encode(a), right = utf8.encode(b);
+  for (let i = 0; i < Math.min(left.length, right.length); i++) if (left[i] !== right[i]) return left[i]! - right[i]!;
+  return left.length - right.length;
+}
+
+/**
+ * A presigned GET of one private object, as `@vercel/blob` 2.9 makes one (`presignUrl` with `operation: 'get'`): the
+ * canonical string `operation=get`, `pathname=…` and, when the URL ends before the delegation, `vercel-blob-valid-until=…`,
+ * sorted and joined by new lines, signed with HMAC-SHA-256 under the client signing token, base64url.
+ */
+export async function presignedGet(contentHost: string, pathname: string, until: number, delegationUntil: number, delegationToken: string, clientSigningToken: string): Promise<string> {
+  const params: [string, string][] = Math.trunc(until) < Math.trunc(delegationUntil) ? [['vercel-blob-valid-until', String(Math.trunc(until))]] : [];
+  const canonical = ['operation=get', `pathname=${pathname}`, ...params.map(([name, value]) => `${name}=${value}`)].sort(byUtf8).join('\n');
+  const key = await crypto.subtle.importKey('raw', utf8.encode(clientSigningToken), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const signature = base64url(new Uint8Array(await crypto.subtle.sign('HMAC', key, utf8.encode(canonical))));
+  const url = new URL(`${contentHost}/${pathname.split('/').map(encodeURIComponent).join('/')}`);
+  for (const [name, value] of params) url.searchParams.set(name, value);
+  url.searchParams.set('vercel-blob-delegation', delegationToken);
+  url.searchParams.set('vercel-blob-signature', signature);
+  return url.toString();
+}
 
 /** The store id inside a read-write token: `vercel_blob_rw_<store id>_<secret>`. */
 export function blobStoreIdOf(token: string): string | null {
@@ -95,7 +131,8 @@ function hint(code: string | null, status: number | null, where: string): string
  * Throttling, server errors and network failures are retried with jittered backoff.
  *
  * Behaviour to know: the constructor throws when there is no token, or the token is not a read-write token (the store
- * id is read from it). `getUri` always answers `null`: a private object has no URL that works without the token, and a
+ * id is read from it). `signedUrl` returns a presigned read URL of one object, valid as long as asked (at most the
+ * hour-long delegation it is signed from), with the stored type and size. `getUri` always answers `null`: a private object has no URL that works without the token, and a
  * permanently public one is never handed out. `listKeys` pages through the whole listing and sorts it. `listPage`
  * continues from the service's cursor when it is asked for the page after the one it last returned, and otherwise
  * lists the prefix and filters it, so it is always correct and usually one request. `deleteMany` sends 100 keys per request.
@@ -123,6 +160,23 @@ export function vercelBlobStore(options: VercelBlobStoreOptions = {}): VercelBlo
   const auth = { authorization: `Bearer ${token}`, 'x-api-version': API_VERSION, 'x-vercel-blob-store-id': storeId };
   // The cursor that continues after a page, by the last key of that page, so the next page is one request.
   const cursors = new Map<string, string>();
+  // A delegation to sign read URLs with, kept while it is good: one request to the API per hour, not per download.
+  type Delegation = { readonly delegationToken: string; readonly clientSigningToken: string; readonly validUntil: number; readonly at: number };
+  let delegation: Promise<Delegation> | null = null;
+  const delegated = (): Promise<Delegation> => {
+    delegation ??= (async () => {
+      const response = (await send(`${api}/signed-token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ operations: ['get'], validUntil: Date.now() + DELEGATION_MS }) }))!;
+      const issued = await response.json() as { delegationToken?: string; clientSigningToken?: string };
+      if (!issued.delegationToken || !issued.clientSigningToken) throw new VercelBlobError(`${where}: the Blob API issued no signing token`, response.status, null);
+      const payload = decodePayload(issued.delegationToken);
+      return { delegationToken: issued.delegationToken, clientSigningToken: issued.clientSigningToken, validUntil: Number(payload?.validUntil) || Date.now() + DELEGATION_MS, at: Date.now() };
+    })().catch(error => { delegation = null; throw error; });
+    return delegation.then((found): Promise<Delegation> | Delegation => {
+      // Renewed well before it lapses, so every URL signed from it lives its full time (but not one just issued, however short).
+      if (found.validUntil - Date.now() < 10 * 60_000 && Date.now() - found.at > 60_000) { delegation = null; return delegated(); }
+      return found;
+    });
+  };
 
   /** One request with retries; a 404 is `null` when `allow404`. */
   async function send(url: string, init: { method: string; headers?: Record<string, string>; body?: Uint8Array | string; allow404?: boolean }, key = ''): Promise<Response | null> {
@@ -206,6 +260,16 @@ export function vercelBlobStore(options: VercelBlobStoreOptions = {}): VercelBlo
     async getUri() {
       // A private object has no URL that works without the token, and a public one is never handed out.
       return null;
+    },
+
+    async signedUrl(key, options) {
+      // The stored type and size, as the store will serve them: what a caller decides on is what the reader gets.
+      const found = await send(`${api}?${new URLSearchParams({ url: base + key })}`, { method: 'GET', allow404: true }, key);
+      if (!found) return null;
+      const meta = await found.json() as { contentType?: string; size?: number };
+      const { delegationToken, clientSigningToken, validUntil } = await delegated();
+      const until = Math.min(Date.now() + Math.max(1, options.expiresInSeconds) * 1000, validUntil);
+      return { url: await presignedGet(content, base + key, until, validUntil, delegationToken, clientSigningToken), contentType: meta.contentType ?? 'application/octet-stream', size: typeof meta.size === 'number' ? meta.size : null };
     },
 
     async listKeys(listPrefix = '') {

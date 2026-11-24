@@ -144,9 +144,15 @@ export async function listRunSummaries(store: ObjectStore, limit = 100, cache: M
   return rows.sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt) || (a.id < b.id ? -1 : 1));
 }
 
-/** Reads one file of a run, or `null` when it is missing. Also `null`, without reading, for an `id` that is not a plain run name or a `relative` path with an empty, `.`, `..` or backslash segment, so a path can never leave the run. */
-export async function readRunFile(store: ObjectStore, id: string, relative: string): Promise<StoredObject | null> {
+/** The store key of one file of a run, or `null` for an `id` that is not a plain run name or a `relative` path with an empty, `.`, `..` or backslash segment, so a path can never leave the run. */
+export function runFileKey(id: string, relative: string): string | null {
   const parts = relative.split('/');
   if (!/^[\w.-]+$/.test(id) || id.startsWith('.') || parts.some(part => !part || part === '.' || part === '..' || part.includes('\\'))) return null;
-  return store.get(`${RUN_PREFIX}${id}/${relative}`);
+  return `${RUN_PREFIX}${id}/${relative}`;
+}
+
+/** Reads one file of a run, or `null` when it is missing. Also `null`, without reading, for a path {@link runFileKey} refuses. */
+export async function readRunFile(store: ObjectStore, id: string, relative: string): Promise<StoredObject | null> {
+  const key = runFileKey(id, relative);
+  return key === null ? null : store.get(key);
 }

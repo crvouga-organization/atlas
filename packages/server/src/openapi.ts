@@ -818,9 +818,9 @@ const BASE_OPERATIONS: readonly Operation[] = [
   {
     route: 'GET /api/data/runs/:id/*', path: '/api/data/runs/{id}/{path}', operationId: 'getRunFile', tag: 'Viewer data', role: 'read',
     summary: 'A file of an uploaded run',
-    description: 'A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable.',
+    description: 'A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable. On a server that sends downloads from the store (the serverless handler does), a browser playing or downloading a recording (`sec-fetch-dest` of `video`, `audio` or `document`, a stored type of video, audio or zip) is answered `302` to a URL of the store that works for five minutes and needs no token; the role is checked first. Every other request gets the bytes.',
     parameters: [{ name: 'id', in: 'path', required: true, description: 'The run id.', schema: str }, { name: 'path', in: 'path', required: true, description: 'The path inside the run.', schema: str }],
-    responses: { '200': { description: 'The file.', contentType: 'application/octet-stream', schema: { type: 'string', format: 'binary' } }, '401': UNAUTHORIZED, '404': problem('No such run or file.') }
+    responses: { '200': { description: 'The file.', contentType: 'application/octet-stream', schema: { type: 'string', format: 'binary' } }, '302': { description: 'A recording, from the store: follow `Location` (a five-minute URL; send the same `Range`).' }, '401': UNAUTHORIZED, '404': problem('No such run or file.') }
   }
 ];
 

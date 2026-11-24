@@ -9,6 +9,7 @@
  *   than the refresh interval, and `GET /api/cron` does the scheduled work (garbage collection when a policy is due).
  * - Any number of instances may run: everything is in the store, and an instance only caches it.
  * - Request bodies are small, so large files go straight to storage (Vercel Blob) and the server checks them after.
+ * - Responses are billed by the second, so a browser playing a run's recording is sent to the store with a five-minute URL.
  * - Requests have a maximum duration, so live streams end on their own before it and viewers reconnect.
  * - A server with neither tokens nor trusted publishers would let anyone administer it, so it refuses to serve.
  *
@@ -113,7 +114,9 @@ export function createAtlasHandler(options: AtlasHandlerOptions = {}): AtlasHand
       // Instances come and go: keep the checkpoint close behind, so the next one starts from it.
       checkpointEveryMs: 30_000,
       streamMaxMs: number(env.ATLAS_STREAM_MAX_SECONDS, DEFAULT_STREAM_SECONDS) * 1000,
-      directUploadOverBytes: number(env.ATLAS_DIRECT_UPLOAD_OVER_BYTES, DEFAULT_DIRECT_UPLOAD_OVER)
+      directUploadOverBytes: number(env.ATLAS_DIRECT_UPLOAD_OVER_BYTES, DEFAULT_DIRECT_UPLOAD_OVER),
+      // Recordings a browser plays come from the store, not through the function (ATLAS_REDIRECT_DOWNLOADS=0 to keep them in).
+      redirectDownloads: env.ATLAS_REDIRECT_DOWNLOADS !== '0' && env.ATLAS_REDIRECT_DOWNLOADS !== 'false'
     });
     await server.ready;
     return { server, config };
