@@ -66,14 +66,15 @@ export function processHeaders(): Readonly<Record<string, string>> {
 
 /**
  * Did a request meant for an Atlas server get a platform's sign-in page instead? True when the request was redirected to
- * another origin (a sign-in host), or the answer is HTML where Atlas answers JSON (`expectJson`), or a 401 or 403 that is
- * HTML (Atlas refuses in JSON). Reads only the status, headers and final URL, never the body.
+ * another host and answered with HTML (a sign-in host), or the answer is HTML where Atlas answers JSON (`expectJson`), or
+ * a 401 or 403 that is HTML (Atlas refuses in JSON). Reads only the status, headers and final URL, never the body.
  */
 export function isSignInPage(response: Response, requested: string, expectJson: boolean): boolean {
   const html = (response.headers.get('content-type') ?? '').toLowerCase().includes('text/html');
-  if (response.redirected && response.url) {
+  if (html && response.redirected && response.url) {
     try {
-      if (new URL(response.url).origin !== new URL(requested).origin) return true;
+      // To another host: an http-to-https redirect of the server itself is not a sign-in.
+      if (new URL(response.url).hostname !== new URL(requested).hostname) return true;
     } catch {
       // An unparsable final URL says nothing.
     }

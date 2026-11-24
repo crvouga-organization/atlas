@@ -8327,8 +8327,8 @@ export function isSignInPage(response: Response, requested: string, expectJson: 
 ```
 
 Did a request meant for an Atlas server get a platform's sign-in page instead? True when the request was redirected to
-another origin (a sign-in host), or the answer is HTML where Atlas answers JSON (`expectJson`), or a 401 or 403 that is
-HTML (Atlas refuses in JSON). Reads only the status, headers and final URL, never the body.
+another host and answered with HTML (a sign-in host), or the answer is HTML where Atlas answers JSON (`expectJson`), or
+a 401 or 403 that is HTML (Atlas refuses in JSON). Reads only the status, headers and final URL, never the body.
 
 #### `signInMessage`
 

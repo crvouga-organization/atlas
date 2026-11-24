@@ -173,3 +173,15 @@ describe('the atlas report commands', () => {
     expect(server.seen[0]!.headers['x-vercel-protection-bypass']).toBe(SECRET);
   });
 });
+
+describe('what is not a sign-in page', () => {
+  test('the server redirecting itself from http to https', async () => {
+    const fetch = (async () => {
+      const response = Response.json({ role: 'read' });
+      Object.defineProperties(response, { redirected: { value: true }, url: { value: 'https://atlas.example.com/api/server' } });
+      return response;
+    }) as unknown as typeof globalThis.fetch;
+    const store = httpStore({ url: 'http://atlas.example.com', headers: {}, fetch });
+    expect(await store.ping()).toMatchObject({ ok: true, role: 'read' });
+  });
+});
