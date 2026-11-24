@@ -171,8 +171,9 @@ and saved settings, one JSON document at `server/state.json`) in object storage 
 or browser-storage path for either, and do not give the required variables a default: a missing or invalid
 one must stop the server with the banner of `packages/server/src/storage.ts` (every variable listed, exit 2; the
 serverless handler answers it as a 503 page). A new variable goes in `S3_VARIABLES` or `BLOB_VARIABLES` and `.env.example`.
-Garbage collection is off until a policy is saved from the UI and deletes only superseded layers
-(`packages/reports/src/garbage.ts`); keep both properties. Server tests run against the in-memory S3 in
+Garbage collection is off by default. An explicit deployment retention policy takes effect at startup and overrides
+a policy saved from the UI. Without a deployment policy, apply the saved policy when one exists. Only superseded
+layers are eligible for collection (`packages/reports/src/garbage.ts`). Server tests run against the in-memory S3 in
 `packages/server/tests/fake-s3.ts` and the fake Blob service in `packages/reports/tests/fake-vercel-blob.ts`.
 
 The serverless handler (`packages/server/src/serverless.ts`) must stay correct when every request lands on a fresh

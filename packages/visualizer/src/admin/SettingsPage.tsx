@@ -481,7 +481,7 @@ export function SettingsPage() {
                         </ThemeIcon>
                         <Stack gap="xs" flex={1} miw={0}>
                           <Text>
-                            All reports and all user state, including the garbage collection policy below, are stored in S3-compatible
+                            All reports and all saved user settings are kept in S3-compatible
                             object storage and nowhere else. The bucket and credentials are set by the server&apos;s required{' '}
                             <Code>ATLAS_S3_*</Code> environment variables and cannot be changed here.
                           </Text>
@@ -512,7 +512,7 @@ export function SettingsPage() {
                       >
                         <Fieldset variant="unstyled" disabled={busy} p={0} m={0} bd={0} miw={0}>
                           <Stack gap="md">
-                            {policyOwner ? <Text size="sm">This policy is managed by {policyOwner}. {!policySaved && 'Save it here to activate the configured schedule.'}</Text> : policySaved ? (
+                            {policyOwner ? <Text size="sm">This policy is managed by {policyOwner}.</Text> : policySaved ? (
                               <Text size="sm" c="dimmed">
                                 This policy is saved in S3 (<Code>server/state.json</Code>) and the server reads it from there each time it collects.
                               </Text>
@@ -629,17 +629,17 @@ export function SettingsPage() {
                             )}
                             <Divider />
                             <Group gap="xs">
-                              <Button id="gc-save" type="submit" variant="filled" loading={busy} disabled={stale || (Boolean(policyOwner) && policySaved)}>
+                              <Button id="gc-save" type="submit" variant="filled" loading={busy} disabled={stale || Boolean(policyOwner)}>
                                 Save garbage collection policy
                               </Button>
-                              <Button id="gc-preview" disabled={!policySaved} loading={busy} onClick={() => void gcRequest('preview')}>
+                              <Button id="gc-preview" disabled={!policySaved && !policyOwner} loading={busy} onClick={() => void gcRequest('preview')}>
                                 Preview deletions
                               </Button>
                               <Button
                                 id="gc-run"
                                 color="red"
                                 variant="light"
-                                disabled={!policySaved || !policy.enabled}
+                                disabled={(!policySaved && !policyOwner) || !policy.enabled}
                                 loading={busy}
                                 onClick={() => void gcRequest('run')}
                               >

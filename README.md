@@ -278,8 +278,8 @@ atlas report status --branch main --ignore-modified  # the gate, answered by the
 The Atlas server keeps **all reports and all user state in S3-compatible object storage, and nowhere else**: no local
 disk, no memory, no database, no browser storage. *User state* is one JSON document in the bucket,
 `server/state.json`, that holds the **garbage collection policy** (defined in the Atlas UI at `/admin`) and the
-settings saved there. The server reads the policy from that document each time it collects. Until someone saves a
-policy, garbage collection is off and nothing is ever deleted.
+settings saved there. An explicitly configured deployment retention policy takes effect at startup. Otherwise the server reads the
+saved policy each time it collects. Collection stays off when neither policy exists.
 
 Because of that, the storage settings are **required environment variables with no defaults** (see
 [`.env.example`](https://github.com/crvouga/atlas/blob/main/.env.example)), and the server **refuses to start** (exit status 2) without them:

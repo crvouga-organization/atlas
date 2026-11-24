@@ -128,7 +128,7 @@ export async function serveMain(argv: readonly string[], io: ServeIo): Promise<n
   }
   io.out(`${config.configFile ? `Configuration ${path.relative(cwd, config.configFile) || config.configFile}. ` : ''}Storage: ${describeStorage(config.storage)}. All reports and user state live there.\n`);
   io.out(config.trustedPublishers.length ? `Trusted publishers (CI may publish without a token): ${config.trustedPublishers.map(describeRule).join(', ')}, from ${config.trustedPublishersSource}.\n` : '');
-  io.out(config.gc ? `Garbage collection policy from ${config.gcSource}: ${stored.state.gc && config.gc.enabled ? 'ON' : 'OFF'}, max age ${config.gc.maxAgeDays} days.\n` : gcLine(stored));
+  io.out(config.gc ? `Garbage collection policy from ${config.gcSource}: ${config.gc.enabled ? 'ON' : 'OFF'}, max age ${config.gc.maxAgeDays} days.\n` : gcLine(stored));
 
   const site = await findSite(config.site, cwd, io.out);
   if (!site) io.out('No Atlas client to serve: build one with `atlas client build --no-data --out atlas-site`. The API is served meanwhile.\n');

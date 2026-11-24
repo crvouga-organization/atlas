@@ -3181,7 +3181,7 @@ The user state document, see {@link UserStateSchema}.
 export const GcSnapshotSchema = …
 ```
 
-`GET /api/settings/gc` and `PUT /api/settings/gc`: the policy as saved in S3 (`null` when none has been saved), the
+`GET /api/settings/gc` and `PUT /api/settings/gc`: the effective deployment or saved policy (`null` when neither exists), the
 revision to send back in `If-Match`, and the result of the last pass this server ran.
 
 #### `GcSnapshot`

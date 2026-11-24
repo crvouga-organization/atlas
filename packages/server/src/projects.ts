@@ -149,7 +149,7 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
         : { gc: pass.runs, note: 'Garbage collection finished.', pass };
     }
     const policy = await options.gc.policy();
-    if (!policy?.enabled) return { gc: null, note: policy ? 'The saved garbage collection policy is disabled.' : 'No garbage collection policy has been saved: nothing is deleted.' };
+    if (!policy?.enabled) return { gc: null, note: policy ? 'The garbage collection policy is disabled.' : 'No garbage collection policy has been saved: nothing is deleted.' };
     const last = await readUtf8(registry, GC_LAST).then(text => Number((text ? JSON.parse(text) : {}).at) || 0, () => 0);
     if (clock() - last < policy.intervalHours * 3_600_000) return { gc: null, note: `Garbage collection ran ${new Date(last).toISOString()}; the next pass is due after ${policy.intervalHours} h.` };
     await writeUtf8(registry, GC_LAST, JSON.stringify({ at: clock() }), 'application/json');
@@ -176,7 +176,7 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
           const policy = await options.gc.policy();
           if (!policy) return problemResponse(409, 'No garbage collection policy has been saved yet, so nothing is deleted. Save one first.');
           const dryRun = ['1', 'true'].includes(url.searchParams.get('dryRun') ?? '');
-          if (!dryRun && !policy.enabled) return problemResponse(409, 'The saved garbage collection policy is disabled. Enable it, or use dryRun to preview.');
+          if (!dryRun && !policy.enabled) return problemResponse(409, 'The garbage collection policy is disabled. Enable it, or use dryRun to preview.');
           // One pass at a time: a request while one runs is answered with that one (and, where requests are bounded, carries it on).
           const pass = await passes.start(dryRun ? { ...policy, enabled: true } : policy, { dryRun });
           if (budget !== undefined) return passResponse(await carryOn(pass.id), policy);

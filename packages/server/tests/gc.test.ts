@@ -28,15 +28,16 @@ async function layersOf(store: ReturnType<typeof storeOn>, days: number[]) {
   for (const day of days) await publishChecks(store, { producer: 'suite', recordedAtMs: day * DAY, checks: [{ id: 'login', title: 'login', status: 'passed', attachments: [{ name: 'log.txt', text: `day ${day} `.repeat(3000) }] }] });
 }
 
-async function setup(options: { gcCheckMs?: number; days?: number[]; gcWaitMs?: number; gcBudgetMs?: number; slowMs?: number; s3?: ReturnType<typeof fakeS3> } = {}) {
+async function setup(options: { env?: Record<string, string>; gcCheckMs?: number; days?: number[]; gcWaitMs?: number; gcBudgetMs?: number; slowMs?: number; s3?: ReturnType<typeof fakeS3> } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'atlas-gc-'));
   dirs.push(dir);
   const s3 = options.s3 ?? fakeS3();
   if (!options.s3) await layersOf(storeOn(s3), options.days ?? [1, 2, 3, 4]);
   // A store that answers slowly, so a pass is still running when it is asked about.
   const served = options.slowMs ? { ...s3, fetch: (async (input: RequestInfo | URL, init?: RequestInit) => { await new Promise(resolve => setTimeout(resolve, options.slowMs)); return s3.fetch(input, init); }) as typeof s3.fetch } : s3;
-  const config = loadServerConfig([], S3_TEST_ENV, dir, () => '{}');
-  const { settings, gc } = storedSettings(config, [], S3_TEST_ENV, dir, userStateStore(storeOn(served)));
+  const env = { ...S3_TEST_ENV, ...options.env };
+  const config = loadServerConfig([], env, dir, () => '{}');
+  const { settings, gc } = storedSettings(config, [], env, dir, userStateStore(storeOn(served)));
   const app = createAtlasServer({
     backends: [{ id: 's3', store: storeOn(served) }], write: 's3', settings, gc, now: () => NOW, refreshMs: 60_000,
     tokens: [{ name: 'admin', role: 'admin', token: 'admin-token-123' }, { name: 'ci', role: 'publish', token: 'publish-token-123' }],
@@ -63,6 +64,14 @@ describe('the garbage collection policy', () => {
     expect(run.status).toBe(409);
     expect((await run.json()).detail).toContain('No garbage collection policy has been saved yet');
     expect((await layerKeys()).length).toBe(4);
+    expect(s3.text(USER_STATE_KEY)).toBeNull();
+  });
+
+  test('an environment retention policy collects before the first save and keeps the current winner', async () => {
+    const { read, app, layerKeys, s3 } = await setup({ env: { ATLAS_GC_MAX_AGE_DAYS: '3', ATLAS_GC_KEEP_LATEST: '1' } });
+    expect(await read()).toMatchObject({ saved: false, source: 'env', policy: { enabled: true, maxAgeDays: 3 } });
+    expect((await app.maintain!('gc')).gc).toMatchObject([{ project: 'default', deletedLayers: 3 }]);
+    expect(await layerKeys()).toHaveLength(1);
     expect(s3.text(USER_STATE_KEY)).toBeNull();
   });
 

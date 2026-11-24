@@ -347,7 +347,7 @@ Projects publish to that domain with `ATLAS_STORE=https://YOUR-DOMAIN` and their
 [sending results](#3-send-results-from-ci-and-from-laptops). Hosting Atlas needs no project checkout; publishing
 your project's test results still needs the integration described there.
 
-Then open `/admin` to define the garbage collection policy; until you save one, nothing is deleted.
+Configure retention through the deployment environment or save a policy in `/admin`. Collection stays off until a policy is enabled.
 
 ### Deploy without authentication
 

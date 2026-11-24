@@ -4,7 +4,6 @@
  * the environment and the flags in precedence) and the garbage collection policy (read by the server each time it
  * collects). Storage and authentication are deployment-owned and are not editable here.
  */
-import { isDeepStrictEqual } from 'node:util';
 import { ServerEditableSettingsSchema } from '../../schema/src/server-config';
 import { GcPolicySchema, type GcPolicy, type GcRun, type GcSnapshot } from '../../schema/src/user-state';
 import { ConfigError, loadServerConfig, type ResolvedServerConfig } from './config';
@@ -22,7 +21,7 @@ export type GcSettings = {
   read(): Promise<GcSnapshot>;
   /** Validates and saves a policy; a stale `revision` is refused. */
   save(policy: unknown, revision: string): Promise<GcSnapshot>;
-  /** The policy in S3 right now, or `null` when none has been saved. Read from S3 every time. */
+  /** The deployment policy, otherwise the current saved policy read from object storage. Returns `null` when neither exists. */
   policy(): Promise<GcPolicy | null>;
   /** Remembers the result of a pass, for `read`. */
   record(runs: readonly GcRun[]): void;
@@ -67,16 +66,15 @@ export function storedSettings(config: ResolvedServerConfig, argv: readonly stri
   const gc: GcSettings = {
     read: async () => gcSnapshot(await userState.read().catch(conflict)),
     async save(input, revision) {
+      if (config.gc) throw new ConfigError('The deployment controls the garbage collection policy.');
       const parsed = GcPolicySchema.safeParse(input);
       if (!parsed.success) throw new ConfigError(parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; '));
-      if (config.gc && !isDeepStrictEqual(parsed.data, config.gc)) {
-        throw new ConfigError('The deployment controls the garbage collection policy. Save its configured values to activate it.');
-      }
       return gcSnapshot(await userState.update(revision, state => ({ ...state, gc: parsed.data })).catch(conflict));
     },
     async policy() {
+      if (config.gc) return config.gc;
       const { state } = await userState.read();
-      return state.gc ? config.gc ?? GcPolicySchema.parse(state.gc) : null;
+      return state.gc ? GcPolicySchema.parse(state.gc) : null;
     },
     record(runs) { lastRuns = [...runs, ...lastRuns.filter(old => !runs.some(run => run.project === old.project))].slice(0, 50); }
   };

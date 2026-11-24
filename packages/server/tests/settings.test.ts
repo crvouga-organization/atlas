@@ -52,17 +52,26 @@ test('deployment retention can be configured without a saved user policy', () =>
   expect(config.gcSource).toBe('env');
 });
 
-test('a deployment policy is inactive until its first admin save and deployment fields are read-only', async () => {
+test('deployment settings apply before the first admin save and are read-only', async () => {
   const { storedSettings } = await import('../src/settings');
   const { userStateStore } = await import('../src/user-state');
   const { memoryStore } = await import('../../reports/tests/memory-store');
   const env = { ...S3_TEST_ENV, ATLAS_GC_MAX_AGE_DAYS: '3' };
   const config = loadServerConfig(['--config', 'atlas.server.json'], env, cwd, () => JSON.stringify({ gc: { maxAgeDays: 7, keepLatest: 4 } }));
-  const { gc } = storedSettings(config, [], env, cwd, userStateStore(memoryStore()));
+  const users = userStateStore(memoryStore());
+  const { gc } = storedSettings(config, [], env, cwd, users);
   const proposed = await gc.read();
   expect(proposed).toMatchObject({ source: 'env', saved: false, policy: { maxAgeDays: 3, keepLatest: 4 } });
-  expect(await gc.policy()).toBeNull();
-  await expect(gc.save({ ...proposed.policy, keepLatest: 0 }, proposed.revision)).rejects.toThrow('deployment controls');
-  expect((await gc.save(proposed.policy, proposed.revision)).saved).toBe(true);
   expect(await gc.policy()).toEqual(proposed.policy);
+  await expect(gc.save({ ...proposed.policy, keepLatest: 0 }, proposed.revision)).rejects.toThrow('deployment controls');
+  await expect(gc.save(proposed.policy, proposed.revision)).rejects.toThrow('deployment controls');
+  expect((await gc.read()).saved).toBe(false);
+  const savedPolicy = { enabled: true, maxAgeDays: 60, keepLatest: 10, intervalHours: 24 };
+  await users.update(proposed.revision, state => ({ ...state, gc: savedPolicy }));
+  const fileConfig = loadServerConfig(['--config', 'atlas.server.json'], S3_TEST_ENV, cwd, () => JSON.stringify({
+    gc: { ...savedPolicy, enabled: false }
+  }));
+  const fromFile = storedSettings(fileConfig, [], S3_TEST_ENV, cwd, users).gc;
+  expect(await fromFile.read()).toMatchObject({ source: 'config', saved: true, policy: { enabled: false } });
+  expect(await fromFile.policy()).toEqual(fileConfig.gc);
 });

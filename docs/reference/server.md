@@ -1068,7 +1068,7 @@ export type GcSettings = {
   read(): Promise<GcSnapshot>;
   /** Validates and saves a policy; a stale `revision` is refused. */
   save(policy: unknown, revision: string): Promise<GcSnapshot>;
-  /** The policy in S3 right now, or `null` when none has been saved. Read from S3 every time. */
+  /** The deployment policy, otherwise the current saved policy read from object storage. Returns `null` when neither exists. */
   policy(): Promise<GcPolicy | null>;
   /** Remembers the result of a pass, for `read`. */
   record(runs: readonly GcRun[]): void;

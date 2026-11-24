@@ -140,14 +140,15 @@ Everything a person using Atlas has chosen is **user state**: one JSON document,
 (published as [`user-state.schema.json`](https://github.com/crvouga/atlas/blob/main/packages/schema/schemas/user-state.schema.json))
 
 - **`gc` is the garbage collection policy**, defined in the Atlas UI (**Settings**, `/admin`, *Garbage collection*) and
-  read by the server **from S3 every time it collects**, so a saved policy applies at the next pass without a restart.
+  read by the server **from S3 every time it collects** when the deployment has no retention policy. A saved policy applies at the next pass without a restart.
 - **`settings`** are the report and live-run settings saved from the same page. They apply at the next start, below
   `atlas.server.json`, the environment and the flags in precedence.
 - A document that does not exist is an empty state; one that exists but cannot be parsed stops the server and is
   never overwritten.
 
 **Deployment retention.** Set `gc` in `atlas.server.json` to override the saved policy. The `ATLAS_GC_*`
-variables override individual deployment fields. Save the proposed policy once in /admin to activate the configured schedule. Set
+variables override individual deployment fields. A deployment policy applies from startup, including on an empty store. For example,
+`ATLAS_GC_MAX_AGE_DAYS=3` activates a three-day policy with the default newest-layer protection. Set
 `ATLAS_GC_ENABLED=false` to disable it. With no deployment or saved policy, collection stays off.
 The settings API reports the effective policy and its source. Deployment policies are read-only in
 `/admin`, which also measures project bytes and object counts by prefix, producer, branch and file role.
@@ -796,7 +797,7 @@ What makes it so, none of it at the cost of the contract:
   starting a new server on a restored copy shows the same report and applies the same garbage collection policy.
 - **Stopping.** `SIGTERM` stops accepting, lets requests in flight finish, ends the event streams and exits 0.
 - **Logs.** One JSON line per request (method, path, status, ms) to stdout, none for the probes. The first lines
-  say which bucket it uses, what the garbage collection policy in S3 is (or that none is saved), and warn when there are no tokens.
+  say which bucket it uses, which garbage collection policy applies (or that collection is off), and warn when there are no tokens.
 - **A backend goes down.** The server keeps serving what it has, names the backend in the client and in
   `/readyz`, and recovers by itself. The gate fails closed: unknown is not a pass.
 - **Upgrades.** The layer format is a stable, versioned contract; upgrade the server before the clients that
