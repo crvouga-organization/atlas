@@ -22,6 +22,7 @@ import {
   NumberInput,
   Paper,
   PasswordInput,
+  Progress,
   SimpleGrid,
   Stack,
   Switch,
@@ -36,7 +37,24 @@ import { GROUND } from '../ui/theme';
 
 type Settings = Record<string, unknown>;
 type GcPolicy = { enabled: boolean; maxAgeDays: number; keepLatest: number; intervalHours: number };
-type GcRun = { project: string; dryRun: boolean; at: string; candidates: number; deletedLayers: number; deletedBlobs: number; keptLayers: number; error?: string };
+type GcRun = { project: string; dryRun: boolean; at: string; candidates: number; deletedLayers: number; deletedBlobs: number; keptLayers: number; error?: string; candidateBlobs?: number; candidateBytes?: number; deletedBytes?: number };
+/** A garbage collection pass as the server keeps it: it may run longer than one request, so it is polled. */
+type GcPass = {
+  id: string;
+  status: 'running' | 'done' | 'failed';
+  dryRun: boolean;
+  progress: { projects: number; projectsDone: number; project: string | null; phase: string | null; candidates: number; layersExamined: number; deletedLayers: number };
+  runs: GcRun[];
+};
+const PHASES: Record<string, string> = { layers: 'deleting superseded layers', scan: 'reading the layers that stay', blobs: 'deleting files only deleted layers used' };
+/** Bytes for people: 0 B, 12.3 KB, 4.5 MB. */
+const bytes = (value: number | undefined) => {
+  if (value === undefined) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value, unit = 0;
+  while (size >= 1000 && unit < units.length - 1) { size /= 1000; unit += 1; }
+  return `${unit ? size.toFixed(1) : size} ${units[unit]}`;
+};
 /** What to suggest when no policy has been saved yet. Nothing is deleted until the person saves it with "Enabled" on. */
 const SUGGESTED_POLICY: GcPolicy = { enabled: false, maxAgeDays: 90, keepLatest: 20, intervalHours: 24 };
 type Field = {
@@ -149,6 +167,7 @@ export function SettingsPage() {
   const [policySaved, setPolicySaved] = useState(false);
   const [runs, setRuns] = useState<GcRun[]>([]);
   const [preview, setPreview] = useState<GcRun[]>();
+  const [pass, setPass] = useState<GcPass>();
   const authorization = (): Record<string, string> => (token ? { authorization: `Bearer ${token}` } : {});
   const failure = (error: unknown) =>
     setMessage({
@@ -168,13 +187,28 @@ export function SettingsPage() {
     }
     return data;
   };
-  const applyGc = (data: { revision: string; policy: GcPolicy | null; saved: boolean; lastRuns: GcRun[] }) => {
+  /**
+   * A pass may outlive one request: the server answers 202 while it runs. Show its progress and ask again until it is
+   * done; asking also carries it on where the server's requests are bounded.
+   */
+  const follow = async (response: Response): Promise<GcPass & { runs: GcRun[] }> => {
+    let data = await readJson(response);
+    while (data.status === 'running') {
+      setPass(data);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      data = await readJson(await fetch(`/api/settings/gc/runs/${encodeURIComponent(data.id)}`, { headers: authorization(), cache: 'no-store' }));
+    }
+    setPass(undefined);
+    return data;
+  };
+  const applyGc = (data: { revision: string; policy: GcPolicy | null; saved: boolean; lastRuns: GcRun[]; currentPass?: GcPass | null }) => {
     setPolicy(data.policy ?? SUGGESTED_POLICY);
     setPolicySaved(data.saved);
     setRuns(data.lastRuns);
+    setPass(data.currentPass ?? undefined);
   };
   /** The garbage collection policy lives in the user state in S3: this reads and writes it through the server, never the browser. */
-  const gcRequest = async (action: 'save' | 'preview') => {
+  const gcRequest = async (action: 'save' | 'preview' | 'run') => {
     if (busy || !revision || (action === 'save' && stale)) return;
     setBusy(true);
     try {
@@ -197,11 +231,19 @@ export function SettingsPage() {
           success: true
         });
       } else {
-        const data = await readJson(
-          await fetch('/api/settings/gc/run?dryRun=1', { method: 'POST', headers: authorization(), cache: 'no-store' })
+        const dryRun = action === 'preview';
+        const data = await follow(
+          await fetch(`/api/settings/gc/run${dryRun ? '?dryRun=1' : ''}`, { method: 'POST', headers: authorization(), cache: 'no-store' })
         );
-        setPreview(data.runs);
-        setMessage({ text: 'Preview finished. Nothing was deleted.' });
+        // Asking while another pass runs answers that pass: say which one finished. A server older than passes says nothing: it ran what was asked.
+        if (data.dryRun ?? dryRun) {
+          setPreview(data.runs);
+          setMessage({ text: 'Preview finished. Nothing was deleted.' });
+        } else {
+          setPreview(undefined);
+          setRuns(data.runs);
+          setMessage({ text: 'Garbage collection finished.', success: true });
+        }
       }
     } catch (error) {
       failure(error);
@@ -494,6 +536,23 @@ export function SettingsPage() {
                                 onChange={(value) => setPolicy({ ...policy, intervalHours: Number(value) })}
                               />
                             </SimpleGrid>
+                            {pass && (
+                              <Stack id="gc-progress" gap={4} role="status" aria-live="polite">
+                                <Text size="sm">
+                                  {pass.dryRun ? 'Previewing' : 'Collecting'}: {pass.progress.projectsDone} of {pass.progress.projects} project
+                                  {pass.progress.projects === 1 ? '' : 's'} done
+                                  {pass.progress.project
+                                    ? `; ${pass.progress.project}${pass.progress.phase ? `, ${PHASES[pass.progress.phase] ?? pass.progress.phase}` : ''}, ${pass.progress.layersExamined} of ${pass.progress.candidates} layers`
+                                    : ''}
+                                  .
+                                </Text>
+                                <Progress
+                                  aria-label="Garbage collection progress"
+                                  value={pass.progress.projects ? (100 * pass.progress.projectsDone) / pass.progress.projects : 0}
+                                  animated
+                                />
+                              </Stack>
+                            )}
                             {(preview ?? runs).length > 0 && (
                               <Table.ScrollContainer minWidth={480}>
                                 <Table id="gc-runs">
@@ -502,6 +561,8 @@ export function SettingsPage() {
                                     <Table.Tr>
                                       <Table.Th>Project</Table.Th>
                                       <Table.Th>{preview ? 'Would delete' : 'Deleted layers'}</Table.Th>
+                                      <Table.Th>{preview ? 'Files' : 'Deleted files'}</Table.Th>
+                                      <Table.Th>{preview ? 'Would free' : 'Freed'}</Table.Th>
                                       <Table.Th>Kept layers</Table.Th>
                                       <Table.Th>Result</Table.Th>
                                     </Table.Tr>
@@ -511,6 +572,8 @@ export function SettingsPage() {
                                       <Table.Tr key={`${run.project}-${run.at}`}>
                                         <Table.Td>{run.project}</Table.Td>
                                         <Table.Td>{preview ? run.candidates : run.deletedLayers}</Table.Td>
+                                        <Table.Td>{preview ? (run.candidateBlobs ?? '—') : run.deletedBlobs}</Table.Td>
+                                        <Table.Td>{bytes(preview ? run.candidateBytes : run.deletedBytes)}</Table.Td>
                                         <Table.Td>{run.keptLayers}</Table.Td>
                                         <Table.Td>{run.error ? `Failed: ${run.error}` : `OK at ${run.at}`}</Table.Td>
                                       </Table.Tr>
@@ -526,6 +589,16 @@ export function SettingsPage() {
                               </Button>
                               <Button id="gc-preview" disabled={!policySaved} loading={busy} onClick={() => void gcRequest('preview')}>
                                 Preview deletions
+                              </Button>
+                              <Button
+                                id="gc-run"
+                                color="red"
+                                variant="light"
+                                disabled={!policySaved || !policy.enabled}
+                                loading={busy}
+                                onClick={() => void gcRequest('run')}
+                              >
+                                Collect now
                               </Button>
                             </Group>
                           </Stack>

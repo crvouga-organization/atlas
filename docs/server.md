@@ -174,6 +174,29 @@ same-origin in browsers) read and save the policy; `POST /api/settings/gc/run` a
 revision is the SHA-256 of the stored document, so saving the policy and saving settings invalidate each other's
 revision: reload, then save. An object store has no conditional writes, so run one server per bucket.
 
+**Passes.** Applying a policy to tens of thousands of layers takes longer than a proxy or a serverless function lets a
+request last, so it runs as a **pass** kept in the store (`server/gc/runs/<id>.json`) rather than inside the request:
+
+- `POST /api/settings/gc/run` starts a pass and answers with it: `200` with every project's run once it is done (a
+  small pass is done before the answer, so the answer is what it always was), or `202 Accepted` with
+  `Location: /api/settings/gc/runs/{id}` while it continues in the background. `?wait=1` waits for the end, as before.
+  `/admin` shows the pass's progress and polls it.
+- There is **one pass at a time**: asking again while one runs answers that one, not a second pass.
+  `GET /api/settings/gc` says which pass is running (`currentPass`), and `GET /api/settings/gc/runs/{id}` how far it has
+  come: the project, its phase (`layers`, `scan`, `blobs`), layers examined and deleted, blobs, bytes.
+- A pass works in **batches** and writes what each batch found to the store before it deletes anything. A pass that is
+  stopped (a restart, a crash, a request that ran out of time) is **carried on** by the next request about it, the
+  schedule or `/api/cron`, from where it was, never started over, and the batches together delete exactly what one
+  uninterrupted pass would. The time ages are judged against is fixed when the pass starts. Two servers could reach for
+  the same pass: a lease in its record keeps them apart, and what is already written makes a repeat harmless.
+- On a host that bounds requests (the [serverless handler](deploying.md#vercel)), each request or scheduled run carries
+  the pass on for at most `ATLAS_GC_BUDGET_SECONDS` (120) and stops; polling the pass, asking to run it again, or the next
+  scheduled run continues it. Elsewhere a pass runs to the end in the background.
+- **A dry run reports what a real pass would free**: per project `candidates` (layers), `candidateBlobs` (captured
+  files only those layers used) and `candidateBytes` (the bytes of those files and of the layers' manifests). A real
+  pass reports the same, plus `deletedLayers`, `deletedBlobs` and `deletedBytes`. Bytes are read from each object's
+  size, without reading the object.
+
 ## Configuration
 
 Everything but the [S3 storage](#required-s3-storage) has a default. Settings come from the settings saved in S3 (the lowest layer), then
@@ -551,6 +574,7 @@ curl "$ATLAS_SERVER_URL/api/projects/$ATLAS_PROJECT/reports/tests?format=markdow
 | `GET /api/settings/gc` | admin | Read the garbage collection policy. |
 | `PUT /api/settings/gc` | admin | Save the garbage collection policy. |
 | `POST /api/settings/gc/run` | admin | Collect garbage now, or preview it. |
+| `GET /api/settings/gc/runs/{id}` | admin | How far a garbage collection pass has come. |
 | `GET /healthz` | none | Is the process up. |
 | `GET /readyz` | none | Has the server read its backends. |
 | `GET /api/openapi.json` | none | This document. |

@@ -10,7 +10,8 @@ import { problemResponse } from './problem';
 import type { AtlasServer, AtlasServerOptions } from './app';
 import type { ObjectStore } from '../../reports/src/object-store';
 import type { HttpStore } from '../../reports/src/http-store';
-import type { GcPolicy, GcRun } from '../../schema/src/user-state';
+import type { GcPass, GcPolicy, GcRun } from '../../schema/src/user-state';
+import { GcPasses } from './gc-passes';
 
 const REGISTRY = 'server/projects/';
 /** When garbage collection last ran from `maintain`, kept in the store: nothing else survives between serverless invocations. */
@@ -75,53 +76,76 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
   };
 
   // Garbage collection. The policy is read from S3 every time, never cached, so a policy saved in the UI is the one applied.
+  // A pass covers every project and is kept in the store, so any instance can report it and carry it on (`gc-passes.ts`).
   const clock = options.now ?? Date.now;
-  let collecting: Promise<GcRun[]> | undefined;
-  let lastCollectedAt = 0;
-  const collectAll = (policy: GcPolicy, dryRun: boolean): Promise<GcRun[]> => {
-    collecting ??= (async () => {
-      const runs: GcRun[] = [];
-      await discover().catch(() => {});
-      for (const slug of ['default', ...[...known].filter(item => item !== 'default').sort()]) {
-        if (closed) break;
-        if (slug === 'default') { runs.push(await base.collectGarbage(policy, { dryRun, project: slug })); continue; }
-        const child = ensureChild(slug);
-        if (!child) { runs.push({ project: slug, dryRun, at: new Date(clock()).toISOString(), candidates: 0, deletedLayers: 0, deletedBlobs: 0, keptLayers: 0, error: 'Too many active projects; this one was skipped.' }); continue; }
-        child.pending++;
-        try { await child.server.ready; runs.push(await child.server.collectGarbage(policy, { dryRun, project: slug })); }
-        finally { child.pending--; child.touched = Date.now(); }
-      }
-      if (!dryRun) options.gc?.record(runs);
-      return runs;
-    })().finally(() => { collecting = undefined; });
-    return collecting;
+  const passes = new GcPasses({
+    store: registry, now: clock, ...(options.log ? { log: options.log } : {}),
+    projects: async () => { await discover().catch(() => {}); return ['default', ...[...known].filter(item => item !== 'default').sort()]; },
+    source: async slug => {
+      if (closed) return { error: 'Atlas is stopping.' };
+      if (slug === 'default') { await base.ready; return base.garbageSource(); }
+      const child = ensureChild(slug);
+      if (!child) return { error: 'Too many active projects; this one was skipped.' };
+      child.pending++;
+      try { await child.server.ready; return await child.server.garbageSource(); }
+      finally { child.pending--; child.touched = Date.now(); }
+    },
+    record: runs => options.gc?.record([...runs])
+  });
+  const budget = options.gcBudgetMs;
+  /** Carry a pass on: within the budget where requests are bounded (serverless), to the end otherwise. */
+  const carryOn = (id: string): Promise<GcPass> => passes.advance(id, budget !== undefined ? { budgetMs: budget } : {});
+  /** On a long-running server a pass runs in the background; nobody waits on it unless they ask to. */
+  const inBackground = (id: string): Promise<GcPass> => {
+    const work = carryOn(id);
+    work.catch(error => options.log?.({ level: 'error', gc: 'pass', error: String(error) }));
+    return work;
   };
+  let lastCollectedAt = 0;
   const gcTimer = options.gc ? setInterval(() => {
     void (async () => {
-      if (closed || collecting) return;
+      if (closed) return;
+      // A pass left running (by a restart, or a step that ran out of time) is carried on before any new one starts.
+      const current = await passes.current();
+      if (current) { if (!passes.busy(current.id)) await carryOn(current.id); return; }
       const policy = await options.gc!.policy();
       if (!policy?.enabled || clock() - lastCollectedAt < policy.intervalHours * 3_600_000) return;
       await base.ready;
       lastCollectedAt = clock();
-      await collectAll(policy, false);
+      await carryOn((await passes.start(policy, { dryRun: false })).id);
     })().catch(error => options.log?.({ level: 'error', gc: 'schedule', error: String(error) }));
   }, options.gcCheckMs ?? 60_000) : undefined;
   gcTimer?.unref?.();
-  const routes = [...base.routes, { method: 'GET', path: '/api/projects' }, { method: 'POST', path: '/api/settings/gc/run' }];
+  const routes = [...base.routes, { method: 'GET', path: '/api/projects' }, { method: 'POST', path: '/api/settings/gc/run' }, { method: 'GET', path: '/api/settings/gc/runs/:id' }];
   for (const route of base.routes) if (route.path.startsWith('/api/') && route.path !== '/api/*' && !GLOBAL.has(route.path)) routes.push({ method: route.method, path: route.path.replace('/api/', '/api/projects/:project/') });
 
+  /** What a request about a pass is answered: `200` with every run once it is done, `202` with where to poll while it runs. */
+  const passResponse = (pass: GcPass, policy: GcPolicy | null): Response => pass.status === 'running'
+    ? Response.json({ ...pass, policy }, { status: 202, headers: { 'cache-control': 'no-store', location: `/api/settings/gc/runs/${pass.id}`, 'retry-after': '2' } })
+    : Response.json({ ...pass, policy }, { headers: { 'cache-control': 'no-store' } });
+
   /** One scheduled pass: what the timers above do, for a host where nothing runs between requests. */
-  async function maintain(): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string }> {
+  async function maintain(): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string; readonly pass?: GcPass | null }> {
     await base.ready;
     await Promise.allSettled([base.index.refresh(), discover()]);
     if (!options.gc) return { gc: null, note: 'Garbage collection is managed by the embedding application.' };
+    const current = await passes.current();
+    if (current) {
+      const pass = await carryOn(current.id);
+      return pass.status === 'running'
+        ? { gc: null, note: 'A garbage collection pass is under way; the next scheduled pass or poll carries it on.', pass }
+        : { gc: pass.runs, note: 'Garbage collection finished.', pass };
+    }
     const policy = await options.gc.policy();
     if (!policy?.enabled) return { gc: null, note: policy ? 'The saved garbage collection policy is disabled.' : 'No garbage collection policy has been saved: nothing is deleted.' };
     const last = await readUtf8(registry, GC_LAST).then(text => Number((text ? JSON.parse(text) : {}).at) || 0, () => 0);
     if (clock() - last < policy.intervalHours * 3_600_000) return { gc: null, note: `Garbage collection ran ${new Date(last).toISOString()}; the next pass is due after ${policy.intervalHours} h.` };
     await writeUtf8(registry, GC_LAST, JSON.stringify({ at: clock() }), 'application/json');
     lastCollectedAt = clock();
-    return { gc: await collectAll(policy, false), note: 'Garbage collection ran.' };
+    const pass = await carryOn((await passes.start(policy, { dryRun: false })).id);
+    return pass.status === 'running'
+      ? { gc: null, note: 'Garbage collection started; the next scheduled pass or poll carries it on.', pass }
+      : { gc: pass.runs, note: 'Garbage collection ran.', pass };
   }
 
   return { ...base, routes, ready, maintain,
@@ -141,7 +165,36 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
           if (!policy) return problemResponse(409, 'No garbage collection policy has been saved yet, so nothing is deleted. Save one first.');
           const dryRun = ['1', 'true'].includes(url.searchParams.get('dryRun') ?? '');
           if (!dryRun && !policy.enabled) return problemResponse(409, 'The saved garbage collection policy is disabled. Enable it, or use dryRun to preview.');
-          return Response.json({ runs: await collectAll(dryRun ? { ...policy, enabled: true } : policy, dryRun), policy }, { headers: { 'cache-control': 'no-store' } });
+          // One pass at a time: a request while one runs is answered with that one (and, where requests are bounded, carries it on).
+          const pass = await passes.start(dryRun ? { ...policy, enabled: true } : policy, { dryRun });
+          if (budget !== undefined) return passResponse(await carryOn(pass.id), policy);
+          const work = inBackground(pass.id);
+          const wait = ['1', 'true'].includes(url.searchParams.get('wait') ?? '') ? Number.POSITIVE_INFINITY : options.gcWaitMs ?? 2000;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const settled = await Promise.race([work.catch(() => null), ...(Number.isFinite(wait) ? [new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), wait); })] : [])]);
+          if (timer) clearTimeout(timer);
+          return passResponse(settled && settled.status !== 'running' ? settled : (await passes.get(pass.id)) ?? pass, policy);
+        }
+        const passMatch = /^\/api\/settings\/gc\/runs\/([^/]+)$/.exec(url.pathname);
+        if (passMatch && request.method === 'GET') {
+          const verdict = auth.check(request, 'admin');
+          if (!verdict.ok) return problemResponse(verdict.status, verdict.message, verdict.status === 401 ? { 'www-authenticate': 'Basic realm="Atlas"' } : {});
+          let pass = await passes.get(decodeURIComponent(passMatch[1]!));
+          if (!pass) return problemResponse(404, 'No such garbage collection pass. Finished passes are kept for a while, then forgotten.');
+          // A pass nobody is carrying on (its step ran out of time, or its server restarted) is carried on by whoever asks after it.
+          if (pass.status === 'running' && !passes.busy(pass.id)) {
+            if (budget !== undefined) pass = await carryOn(pass.id);
+            else void inBackground(pass.id);
+          }
+          return passResponse(pass, await options.gc?.policy().catch(() => null) ?? null);
+        }
+        if (url.pathname === '/api/settings/gc' && request.method === 'GET') {
+          // What the base answers, plus what only the node knows: the pass running now, and the last pass when this process ran none.
+          const response = await base.fetch(request);
+          if (!response.ok) return response;
+          const snapshot = await response.json() as { lastRuns?: GcRun[] };
+          const lastRuns = snapshot.lastRuns?.length ? snapshot.lastRuns : await passes.lastRuns().catch(() => []);
+          return Response.json({ ...snapshot, lastRuns, currentPass: await passes.current().catch(() => null) }, { headers: { 'cache-control': 'no-store' } });
         }
         if (url.pathname === '/api/projects' && request.method === 'GET') {
           const verdict = auth.check(request, 'read');
