@@ -11,7 +11,7 @@
  */
 
 import { PublishChecksSchema, type Attachment, type PublishChecksInput } from '../../schema/src/layer';
-import { writeBundle, type BundleEntry } from './bundle';
+import { writeBundle, type BundleIndex, type BundleEntry } from './bundle';
 import type { ReportPart } from './explorer-types';
 import { normalizeEnvironment } from './layer-axes';
 import { publishLayerBundle } from './layer-store';
@@ -88,6 +88,11 @@ async function materialize(holder: Loose, entries: Map<string, BundleEntry>, lim
  * Each check's `id` is its identity across runs. It must be stable and unique within the layer.
  */
 export async function publishChecks(store: ObjectStore, input: PublishChecksInput, options: PublishChecksOptions = {}): Promise<ReportLayer> {
+  const { summary, bundle } = await prepareChecks(store, input, options);
+  return publishLayerBundle(store, summary, bundle);
+}
+
+async function prepareChecks(store: ObjectStore, input: PublishChecksInput, options: PublishChecksOptions) {
   const args = parseWith(PublishChecksSchema, input, 'publishChecks');
   const seen = new Set<string>();
   for (const check of args.checks) {
@@ -137,5 +142,37 @@ export async function publishChecks(store: ObjectStore, input: PublishChecksInpu
     ...(args.extensions && Object.keys(args.extensions).length ? { extensions: args.extensions } : {})
   };
   const bundle = entries.size ? await writeBundle(store, (async function* () { for (const entry of [...entries.values()].sort((a, b) => (a.key < b.key ? -1 : 1))) yield entry; })(), 'layers/blobs/') : {};
-  return publishLayerBundle(store, summary, bundle);
+  return { summary, bundle };
+}
+
+/** Publish all checks, splitting a rejected oversized manifest at check boundaries. Attachment chunks are written once.
+ * Every successful piece is immutable and retrying the same input reuses the same layer IDs.
+ * A single check that cannot fit, or any other upload error, rejects the publication.
+ */
+export async function publishCheckLayers(store: ObjectStore, input: PublishChecksInput): Promise<ReportLayer[]> {
+  const { summary, bundle } = await prepareChecks(store, input, {});
+  async function send(part: ReportPart, files: BundleIndex, header: typeof summary): Promise<ReportLayer[]> {
+    try {
+      return [await publishLayerBundle(store, header, files)];
+    } catch (error) {
+      if ((error as { status?: number })?.status !== 413 || part.checks.length < 2) throw error;
+    }
+    const middle = Math.ceil(part.checks.length / 2);
+    const published: ReportLayer[] = [];
+    for (const checks of [part.checks.slice(0, middle), part.checks.slice(middle)]) {
+      const piece = { ...part, checks };
+      const referenced = new Set<string>();
+      const collect = (holder: Loose) => {
+        for (const attachment of holder.attachments as Attachment[] ?? []) if (attachment.bundleKey) referenced.add(attachment.bundleKey);
+        for (const nested of [...holder.steps as Loose[] ?? [], ...holder.attempts as Loose[] ?? []]) collect(nested);
+      };
+      collect(header);
+      for (const check of checks) collect(check as unknown as Loose);
+      const subset = Object.fromEntries(Object.entries(files).filter(([key]) => referenced.has(key)));
+      const next = { ...header, parts: [piece], recordings: recordingReceipt(checks as unknown as Loose[]) };
+      published.push(...await send(piece, subset, next));
+    }
+    return published;
+  }
+  return send(summary.parts[0]!, bundle, summary);
 }

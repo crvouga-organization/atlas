@@ -22,6 +22,8 @@
 
 /** An object read from a store: a one-shot byte stream with its media type and length. */
 export interface StoredObject {
+  /** Opaque version for a store that supports conditional writes. */
+  readonly etag?: string;
   /** Stream of stored bytes. Single-use; consume or discard before issuing more I/O on the same store. */
   readonly body: ReadableStream<Uint8Array>;
   /** The media type the object was written with. */
@@ -94,4 +96,31 @@ export interface SignedDownloads {
 /** Whether a store can hand out short-lived download URLs (`SignedDownloads`). */
 export function canSign(store: ObjectStore): store is ObjectStore & SignedDownloads {
   return typeof (store as Partial<SignedDownloads>).signedUrl === 'function';
+}
+
+/** Optional store support for sending bytes to a private staging key and atomically creating the validated destination. */
+export interface StagedUploads {
+  /** Sign a short-lived PUT to one staging key, binding its content length and type. */
+  stagedUploadTarget(key: string, upload: { size: number; contentType: string }): Promise<{
+    method: 'PUT'; url: string; headers: Record<string, string>; expiresAt: string;
+  }>;
+  /** Write only when the destination does not exist. Returns false when another writer already created it. */
+  putIfAbsent(key: string, bytes: Uint8Array, contentType: string): Promise<boolean>;
+}
+
+/** Whether the store supports private staging and atomic promotion of verified bytes. */
+export function canStage(store: ObjectStore): store is ObjectStore & StagedUploads {
+  const candidate: Partial<StagedUploads> = store as Partial<StagedUploads>;
+  return typeof candidate.stagedUploadTarget === 'function' && typeof candidate.putIfAbsent === 'function';
+}
+
+/** Optional atomic mutation for shared server state. A null expected tag creates only an absent key. */
+export interface ConditionalWrites {
+  /** Returns false when the current version differs from the one read by the caller. */
+  putConditional(key: string, bytes: Uint8Array, contentType: string, expected: string | null): Promise<boolean>;
+}
+
+/** Whether the store implements atomic writes against an observed version. */
+export function canWriteConditionally(store: ObjectStore): store is ObjectStore & ConditionalWrites {
+  return typeof (store as Partial<ConditionalWrites>).putConditional === 'function';
 }

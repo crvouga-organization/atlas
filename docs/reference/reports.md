@@ -5645,7 +5645,7 @@ Transport and batching configuration. Defaults: 250 ms batches, 5 s heartbeats a
 #### `LiveReporter`
 
 ```ts
-export type LiveReporter = { readonly id: string; compact?(layer: string): Promise<void>; readonly finishedAtMs?: number; check(check: LiveCheck): void; flush(): Promise<void>; finish(status?: 'completed' | 'interrupted', reason?: string): Promise<void> };
+export type LiveReporter = { readonly id: string; compact?(layer: string, additional?: readonly string[]): Promise<void>; readonly finishedAtMs?: number; check(check: LiveCheck): void; flush(): Promise<void>; finish(status?: 'completed' | 'interrupted', reason?: string): Promise<void> };
 ```
 
 Producer handle. check never throws transport errors into a test; finish flushes and rejects if publication failed.
@@ -5868,6 +5868,8 @@ See docs/report-contract.md#backends
 
 ```ts
 export interface StoredObject {
+  /** Opaque version for a store that supports conditional writes. */
+  readonly etag?: string;
   /** Stream of stored bytes. Single-use; consume or discard before issuing more I/O on the same store. */
   readonly body: ReadableStream<Uint8Array>;
   /** The media type the object was written with. */
@@ -5961,6 +5963,48 @@ export function canSign(store: ObjectStore): store is ObjectStore & SignedDownlo
 ```
 
 Whether a store can hand out short-lived download URLs (`SignedDownloads`).
+
+#### `StagedUploads`
+
+```ts
+export interface StagedUploads {
+  /** Sign a short-lived PUT to one staging key, binding its content length and type. */
+  stagedUploadTarget(key: string, upload: { size: number; contentType: string }): Promise<{
+    method: 'PUT'; url: string; headers: Record<string, string>; expiresAt: string;
+  }>;
+  /** Write only when the destination does not exist. Returns false when another writer already created it. */
+  putIfAbsent(key: string, bytes: Uint8Array, contentType: string): Promise<boolean>;
+}
+```
+
+Optional store support for sending bytes to a private staging key and atomically creating the validated destination.
+
+#### `canStage`
+
+```ts
+export function canStage(store: ObjectStore): store is ObjectStore & StagedUploads
+```
+
+Whether the store supports private staging and atomic promotion of verified bytes.
+
+#### `ConditionalWrites`
+
+```ts
+export interface ConditionalWrites {
+  /** Returns false when the current version differs from the one read by the caller. */
+  putConditional(key: string, bytes: Uint8Array, contentType: string, expected: string | null): Promise<boolean>;
+}
+```
+
+Optional atomic mutation for shared server state. A null expected tag creates only an absent key.
+
+#### `canWriteConditionally`
+
+```ts
+export function canWriteConditionally(store: ObjectStore): store is ObjectStore & ConditionalWrites
+```
+
+Whether the store implements atomic writes against an observed version.
 
 ### Consumer package-manager commands
 
@@ -6423,6 +6467,16 @@ namespaced `extensions`. All of it is optional (docs/extending.md).
 Nothing here reads a clock: `recordedAtMs` is when the checks ran, given by the caller. Publishing
 the same input twice therefore writes the same layer, and a retried CI step changes nothing.
 Each check's `id` is its identity across runs. It must be stable and unique within the layer.
+
+#### `publishCheckLayers`
+
+```ts
+export async function publishCheckLayers(store: ObjectStore, input: PublishChecksInput): Promise<ReportLayer[]>
+```
+
+Publish all checks, splitting a rejected oversized manifest at check boundaries. Attachment chunks are written once.
+Every successful piece is immutable and retrying the same input reuses the same layer IDs.
+A single check that cannot fit, or any other upload error, rejects the publication.
 
 ### Publishing commit-keyed recordings
 
@@ -7726,7 +7780,7 @@ memory proportional to the number of checks and not to how long the project has 
 It reads only immutable layers (`layers/index/…`), which is what makes "read once" correct.
 
 - `refresh(): Promise<boolean>` — Read what is new in every backend and fold it in. Resolves true when the report changed. Calls overlap safely.
-- `async refreshNow(): Promise<boolean>` — A refresh that surely starts after this call: one already under way may have looked before whatever made the caller ask. Used when something was just written.
+- `async refreshNow(full = false): Promise<boolean>` — A refresh that surely starts after this call: one already under way may have looked before whatever made the caller ask. Pass true to list the entire catalog and flush its checkpoint during scheduled maintenance.
 - `accept(backendId: string, indexKey: string, known?: ReportLayer): Promise<void>` — Take in a layer an uploader has just written, from its catalog entry, without listing anything. Entries are read one after another; one already known is ignored. The regular refresh still reconciles the rest.
 - `onChange(listener: (change: IndexChange) => void): () => void` — Be told when the report changes. Returns how to stop.
 - `async start(intervalMs: number): Promise<void>` — Keep refreshing in the background. The first call returns once the first pass has finished.
@@ -9511,7 +9565,7 @@ permission); `status` and `code` are what the service answered, `null` when it w
 #### `S3Store`
 
 ```ts
-export type S3Store = ObjectStore & PagedListing & SignedDownloads & {
+export type S3Store = ObjectStore & ConditionalWrites & PagedListing & SignedDownloads & StagedUploads & {
   /** A description with no secrets: `s3://bucket/prefix (us-east-1)`. */
   readonly label: string;
   /** Where the credentials came from, once a request has been made. */
@@ -9695,11 +9749,11 @@ anything and does not read the body; `payloadHash` is trusted.
 #### `presignUrl`
 
 ```ts
-export async function presignUrl(input: { readonly url: URL; readonly credentials: Credentials; readonly region: string; readonly service: string; readonly at: Date; readonly expiresSeconds: number }): Promise<string>
+export async function presignUrl(input: { readonly url: URL; readonly credentials: Credentials; readonly region: string; readonly service: string; readonly at: Date; readonly expiresSeconds: number; readonly upload?: { size: number; contentType: string } }): Promise<string>
 ```
 
-A query-signed URL anyone can GET until it expires, without credentials: for handing a file to a browser. Valid for
-`expiresSeconds` from `at`; signs only the `host` header and an unsigned payload, so it works for `GET` only.
+A query-signed URL for one key. By default it signs a GET for a browser. A staging PUT binds its upload headers. Valid for
+`expiresSeconds` from `at`.
 
 ### Snapshot bundles
 
@@ -10345,6 +10399,9 @@ Keys passed to `get`, `put`, `head`, `delete`, `deleteMany`, `getUri` are checke
 empty, no leading `/`, no `..`) and throw otherwise. The `prefix` argument of `listKeys` and `listPage` is not
 checked here; the store underneath is responsible for it. Returned keys have the prefix removed.
 
+- `putConditional?: ConditionalWrites['putConditional'];` — Compare and write within this prefix when the underlying store supports it.
+- `stagedUploadTarget?: StagedUploads['stagedUploadTarget'];` — Signed staging under this project prefix when supported by the underlying store.
+- `putIfAbsent?: StagedUploads['putIfAbsent'];` — Atomically create a validated destination under this project prefix.
 - `get(key: string): Promise<StoredObject | null>` — Reads `prefix + key` from the underlying store; `null` when missing. Throws for an invalid key.
 - `put(key: string, bytes: Uint8Array, contentType: string): Promise<void>` — Writes `prefix + key` in the underlying store. Throws for an invalid key.
 - `head(key: string): Promise<boolean>` — Whether `prefix + key` exists in the underlying store. Throws for an invalid key.
@@ -14287,7 +14344,7 @@ says whether trying again can help; the store already retried before throwing.
 #### `VercelBlobStore`
 
 ```ts
-export type VercelBlobStore = ObjectStore & PagedListing & SignedDownloads & {
+export type VercelBlobStore = ObjectStore & ConditionalWrites & StagedUploads & PagedListing & SignedDownloads & {
   /** A description with no secrets: `vercel-blob://my-project/ (store abc123)`. */
   readonly label: string;
   /**

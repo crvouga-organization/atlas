@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
+import { createAtlasServer } from '../../server/src/app';
+import { httpStore } from '../src/http-store';
 import { combineBackends } from '../src/compose';
 import { copyStore } from '../src/copy-store';
 import { verifyObjectStore } from '../src/object-store-conformance';
@@ -57,6 +59,52 @@ suite('s3Store against a real server', () => {
     expect(url).not.toBeNull();
     expect(await (await fetch(url!)).text()).toBe('hello');
     expect(await store.getUri('nope')).toBeNull();
+  });
+
+  test('a signed staging upload commits verified bytes and preserves the first immutable file', async () => {
+    const store = make(unique());
+    const bytes = new TextEncoder().encode('recorded evidence');
+    const target = await store.stagedUploadTarget('server/uploads/sample', { size: bytes.length, contentType: 'video/webm' });
+    expect((await fetch(target.url, { method: target.method, headers: target.headers, body: bytes })).ok).toBe(true);
+    expect(await store.head('server/uploads/sample')).toBe(true);
+    expect(await store.putIfAbsent('recording', bytes, 'video/webm')).toBe(true);
+    expect(await store.putIfAbsent('recording', bytes, 'video/webm')).toBe(false);
+    const original = await store.get('recording');
+    await original!.body.cancel();
+    expect(original?.etag).toBeTruthy();
+    expect(await store.putConditional('recording', new Uint8Array([0]), 'video/webm', original!.etag!)).toBe(true);
+    expect(await store.putConditional('recording', bytes, 'video/webm', original!.etag!)).toBe(false);
+  });
+
+  test('the HTTP publisher sends file bytes only to S3 and a second instance validates completion', async () => {
+    const store = make(unique()).withPrefix('project');
+    const options = { backends: [{ id: 'bucket', store }], write: 'bucket', directUploadOverBytes: 128 };
+    const servers = [createAtlasServer(options), createAtlasServer(options)];
+    try {
+      await Promise.all(servers.map(server => server.ready));
+      let direct = 0;
+      const route = (async (input, init) => {
+        const url = new URL(String(input));
+        if (url.hostname !== 'atlas.test') {
+          expect(new Headers(init?.headers).has('authorization')).toBe(false);
+          expect(new Headers(init?.headers).has('x-atlas-extra')).toBe(false);
+          expect(await store.head('layers/runs/recording/clip.webm')).toBe(false);
+          direct++;
+          return fetch(input, init);
+        }
+        if (init?.body) expect((await new Response(init.body).arrayBuffer()).byteLength).toBeLessThan(512);
+        return servers[url.searchParams.get('upload') === 'complete' ? 1 : 0]!.fetch(new Request(url, init));
+      }) as typeof fetch;
+      const client = httpStore({ url: 'http://atlas.test', fetch: route, headers: { 'x-atlas-extra': 'test' }, retries: 0 });
+      const key = 'layers/runs/recording/clip.webm';
+      const bytes = new Uint8Array(4096).fill(42);
+      await client.put(key, bytes, 'video/webm');
+      await client.put(key, bytes, 'video/webm');
+      expect(direct).toBe(1);
+      expect(new Uint8Array(await new Response((await store.get(key))!.body).arrayBuffer())).toEqual(bytes);
+      expect(await store.listKeys('server/uploads/')).toEqual([]);
+      await expect(client.put(key, new Uint8Array(4096), 'video/webm')).rejects.toThrow('immutable file');
+    } finally { servers.forEach(server => server.close()); }
   });
 
   test('wrong keys and a missing bucket say what is wrong', async () => {

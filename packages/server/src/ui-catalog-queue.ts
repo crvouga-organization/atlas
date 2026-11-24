@@ -21,8 +21,8 @@ import type { Context, Hono } from 'hono';
 import { z } from 'zod/v4';
 
 import type { EffectiveEvidence } from '../../reports/src/report-index';
-import type { ObjectStore } from '../../reports/src/object-store';
-import { readUtf8, writeUtf8 } from '../../reports/src/object-io';
+import { canWriteConditionally, type ConditionalWrites, type ObjectStore } from '../../reports/src/object-store';
+import { readBytes, readUtf8, writeUtf8 } from '../../reports/src/object-io';
 import type { PublishChecksInput } from '../../schema/src/layer';
 import { catalogPlanLayers, catalogVersion, CatalogDefinitionError, checkWhere, expandCatalog, type ExpandedCatalog } from '../../reports/src/ui-catalog-definition';
 import { claimedItem, latestUiResults, pickUnits, rankUnits, tierOf, unitFingerprint, type RankedUnit, type UiItemResult } from '../../reports/src/ui-catalog-queue';
@@ -61,6 +61,8 @@ type Persisted = {
 export type CatalogQueueOptions = {
   /** Where definitions and the queue document are kept: the server's store, scoped to the project. */
   readonly store: ObjectStore;
+  /** Share claims through atomic storage revisions across serverless instances. */
+  readonly shared?: boolean;
   /** The report as it stands, to read results from. */
   readonly snapshot: () => EffectiveEvidence;
   /** Publish a definition's plan layers into the report. */
@@ -82,7 +84,9 @@ export class CatalogQueue {
   /** Resolves once the stored state is read; rejects when the store cannot be read (each request then retries). */
   readonly ready: Promise<void>;
   private readonly now: () => number;
-  private state: Persisted = { schemaVersion: 1, latest: null, claims: [], ended: [], attempts: {}, abandoned: {}, shards: {}, finished: [] };
+  private readonly shared?: ObjectStore & ConditionalWrites;
+  private empty(): Persisted { return { schemaVersion: 1, latest: null, claims: [], ended: [], attempts: {}, abandoned: {}, shards: {}, finished: [] }; }
+  private state = this.empty();
   private readonly claims = new Map<string, Claim>();
   private readonly held = new Map<string, string>();
   private readonly definitions = new Map<string, Promise<ExpandedCatalog | null>>();
@@ -96,6 +100,7 @@ export class CatalogQueue {
   private writing: Promise<void> | null = null;
 
   constructor(private readonly options: CatalogQueueOptions) {
+    if (options.shared && canWriteConditionally(options.store)) this.shared = options.store;
     this.now = options.now ?? Date.now;
     this.ready = this.restore();
     void this.ready.catch(() => undefined);
@@ -103,7 +108,14 @@ export class CatalogQueue {
 
   private async restore(): Promise<void> {
     const text = await readUtf8(this.options.store, STATE_KEY);
-    if (text === null) return;
+    this.load(text);
+  }
+  private load(text: string | null): void {
+    this.state = this.empty();
+    this.claims.clear();
+    this.held.clear();
+    this.ranked = null;
+    if (!text) return;
     const stored = JSON.parse(text) as Partial<Persisted>;
     this.state = { ...this.state, ...stored, claims: [], ended: stored.ended ?? [] };
     for (const claim of stored.claims ?? []) {
@@ -118,8 +130,29 @@ export class CatalogQueue {
     return run;
   }
 
+  private sharedChange<T>(work: () => Promise<T>): Promise<T> {
+    const store = this.shared!;
+    return this.exclusive(async () => {
+      for (let retry = 0; retry < 20; retry++) {
+        const object = await store.get(STATE_KEY);
+        const text = object ? new TextDecoder().decode(await readBytes(object.body)) : null;
+        if (object && !object.etag) throw new Error('The catalog queue has no storage version.');
+        this.load(text);
+        const serialize = () => JSON.stringify({ ...this.state, claims: [...this.claims.values()] });
+        const before = serialize();
+        const result = await work().then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }));
+        const after = serialize();
+        if (before !== after && !await store.putConditional(STATE_KEY, new TextEncoder().encode(after), 'application/json', object?.etag ?? null)) continue;
+        if (!result.ok) throw result.error;
+        return result.value;
+      }
+      throw new CatalogQueueError(409, 'The collection queue changed. Retry the request.');
+    });
+  }
+
   /** Make a change under the lock, then store it (whether or not the change was refused, since reconciling may have changed something). */
   private async change<T>(work: () => Promise<T>): Promise<T> {
+    if (this.shared) return this.sharedChange(work);
     try { return await this.exclusive(work); } finally { await this.persist(); }
   }
 
@@ -270,24 +303,26 @@ export class CatalogQueue {
       if (error instanceof CatalogDefinitionError) throw new CatalogQueueError(422, error.message);
       throw error;
     }
-    return this.exclusive(async () => {
+    const publishedAt = this.now();
+    const publish = async () => {
       const counts = { version, profiles: expanded.profiles.length, items: expanded.items.length, units: expanded.units.length };
       if (this.state.latest === version) return { ...counts, created: false, latest: true, layers: 0 };
       const stored = await this.options.store.head(definitionKey(version));
       if (!stored) await writeUtf8(this.options.store, definitionKey(version), JSON.stringify(parsed.data), 'application/json');
       this.definitions.set(version, Promise.resolve(expanded));
-      const layers = catalogPlanLayers(expanded, this.now());
+      const layers = catalogPlanLayers(expanded, publishedAt);
       await this.options.publishPlan(layers);
       this.state.latest = version;
-      await this.persist();
+      if (!this.shared) await this.persist();
       return { ...counts, created: !stored, latest: true, layers: layers.length };
-    });
+    };
+    return this.shared ? this.sharedChange(publish) : this.exclusive(publish);
   }
 
   /** The version of the latest published definition, or null when none was published. */
   async latestDefinition(): Promise<string | null> {
     await this.ready;
-    return this.state.latest;
+    return this.shared ? this.sharedChange(async () => this.state.latest) : this.state.latest;
   }
 
   /** A stored definition document, or null. */
@@ -408,6 +443,7 @@ export class CatalogQueue {
   /** Expire lapsed claims and close answered units. Called on a timer and when the report changes. */
   async sweep(): Promise<void> {
     await this.ready;
+    if (this.shared) { await this.sharedChange(() => this.reconcile()); return; }
     const changed = await this.exclusive(() => this.reconcile());
     if (changed) await this.persist();
   }

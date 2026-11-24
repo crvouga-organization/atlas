@@ -136,6 +136,10 @@
       "description": "How this server takes uploads. Absent from a server that predates it: every upload goes through it",
       "type": "object",
       "properties": {
+        "gzipManifests": {
+          "description": "Accepts gzip-compressed manifest bytes in PUT requests with X-Atlas-Compression: gzip.",
+          "type": "boolean"
+        },
         "directOverBytes": {
           "anyOf": [
             {

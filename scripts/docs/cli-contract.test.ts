@@ -102,3 +102,30 @@ test('every documented JSON result validates against the same registry that publ
     }
   } finally { server.close(); await http.close(200); await rm(cwd, { recursive: true, force: true }); }
 }, 30_000);
+
+test('a split publish result describes every stored layer', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'atlas-split-contract-'));
+  const app = createAtlasServer({ backends: [{ id: 'test', store: memoryStore() }], write: 'test' });
+  const http = await listen(async request => {
+    if (request.method === 'PUT' && new URL(request.url).pathname.includes('/manifests/') &&
+        (await request.clone().arrayBuffer()).byteLength > 8_192) return new Response(null, { status: 413 });
+    return app.fetch(request);
+  }, { port: 0, host: '127.0.0.1', maxBodyBytes: 16 << 20 });
+  try {
+    await app.ready;
+    const checks = Array.from({ length: 32 }, (_, i) => ({ id: String(i), title: 'check', status: 'passed', detail: 'detail '.repeat(100) }));
+    await writeFile(path.join(cwd, 'checks.json'), JSON.stringify({ producer: 'batch', checks }));
+    const child = Bun.spawn([process.execPath, cli, 'report', 'publish', '--checks', 'checks.json', '--format', 'json'],
+      { cwd, env: { ...process.env, ATLAS_STORE: http.url }, stdout: 'pipe', stderr: 'pipe' });
+    const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    expect(code, err).toBe(0);
+    const result = CLI_RESULTS.publish.schema.parse(JSON.parse(out));
+    expect(result.layers!.length).toBeGreaterThan(1);
+    expect(result.layer).toEqual(result.layers![0]!);
+    expect(result.layers!.length).toBe(app.index.snapshot().totalLayers);
+  } finally {
+    app.close();
+    await http.close();
+    await rm(cwd, { force: true, recursive: true });
+  }
+});

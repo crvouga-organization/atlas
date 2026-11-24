@@ -12,6 +12,7 @@
 
 import type { ObjectStore, PagedListing, StoredObject } from './object-store';
 import { ObjectStoreWithPrefix } from './store-prefix';
+import { sha256Hex } from './sigv4';
 import { ProjectSlugSchema } from '../../schema/src/project';
 import { isSignInPage, processHeaders, signInMessage } from './request-headers';
 import type { IdentitySource } from './ci-identity';
@@ -148,21 +149,23 @@ export function httpStore(options: HttpStoreOptions): HttpStore {
 
   // A server on a host that refuses large request bodies says how large a file may pass through it (`uploads.directOverBytes`).
   // An older server says nothing, and everything goes through it as before.
-  let directOver: Promise<number | null> | undefined;
-  const directThreshold = () => directOver ??= request('GET', `${base}/api/server`, { json: true })
-    .then(async response => { const info = await response!.json() as { uploads?: { directOverBytes?: number | null } }; return typeof info.uploads?.directOverBytes === 'number' ? info.uploads.directOverBytes : null; })
-    .catch(() => null);
+  type Uploads = { directOverBytes?: number | null; gzipManifests?: boolean };
+  let negotiated: Promise<Uploads> | undefined;
+  const uploads = (): Promise<Uploads> => negotiated ??= request('GET', `${base}/api/server`, { json: true })
+    .then(async response => (await response!.json() as { uploads?: Uploads }).uploads ?? {})
+    .catch(() => ({}));
 
   /** Send a large file straight to storage when the server offers it. False: send it through the server instead. */
   async function putDirect(key: string, bytes: Uint8Array, contentType: string): Promise<boolean> {
     if (!DIRECT_KEY.test(key)) return false;
-    const over = await directThreshold();
-    if (over === null || bytes.length <= over) return false;
+    const over = (await uploads()).directOverBytes;
+    if (over == null || bytes.length <= over) return false;
     const url = `${root}/${encode(key)}`;
     const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
-    const started = await request('POST', `${url}?upload=start`, { body: json({ size: bytes.length, contentType }), contentType: 'application/json', json: true, accept: [404, 422] });
+    const descriptor = json({ size: bytes.length, contentType, sha256: await sha256Hex(bytes) });
+    const started = await request('POST', `${url}?upload=start`, { body: descriptor, contentType: 'application/json', json: true, accept: [404, 422] });
     if (!started || started.status === 404 || started.status === 422) { await started?.body?.cancel(); return false; }
-    const target = await started.json() as { exists?: boolean; method?: string; url?: string; headers?: Record<string, string> };
+    const target = await started.json() as { exists?: boolean; staged?: boolean; method?: string; url?: string; headers?: Record<string, string> };
     if (target.exists) return true;
     if (!target.url || target.method !== 'PUT') throw new AtlasHttpError(`${base} offered an upload target it did not describe`, started.status);
     // Straight to storage: only the target's own short-lived headers go there, never the Atlas token or ATLAS_HEADERS.
@@ -174,7 +177,7 @@ export function httpStore(options: HttpStoreOptions): HttpStore {
       if (attempt >= retries || (status !== null && status < 500 && status !== 429)) throw new AtlasHttpError(`storage refused ${key} sent straight to it (${status ?? (sent as Error).message})`, status, false);
       await sleep(Math.random() * Math.min(8_000, 100 * 2 ** attempt));
     }
-    await (await request('POST', `${url}?upload=complete`))?.arrayBuffer();
+    await (await request('POST', `${url}?upload=complete`, target.staged ? { body: descriptor, contentType: 'application/json' } : {}))?.arrayBuffer();
     return true;
   }
 
@@ -191,6 +194,14 @@ export function httpStore(options: HttpStoreOptions): HttpStore {
     },
     async put(key, bytes, contentType) {
       if (await putDirect(key, bytes, contentType)) return;
+      if (bytes.length > 64 * 1024 && /^layers\/manifests\/[0-9a-f]{64}\.json$/.test(key) && (await uploads()).gzipManifests) {
+        const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new CompressionStream('gzip'));
+        const compressed = new Uint8Array(await new Response(stream).arrayBuffer());
+        if (compressed.length < bytes.length) {
+          await (await request('PUT', `${root}/${encode(key)}`, { body: compressed, contentType, headers: { 'x-atlas-compression': 'gzip' } }))?.arrayBuffer();
+          return;
+        }
+      }
       await (await request('PUT', `${root}/${encode(key)}`, { body: bytes, contentType }))?.arrayBuffer();
     },
     async head(key) {

@@ -40,6 +40,7 @@ export const PublishResultSchema = z.looseObject({
   ok: z.boolean().describe('True when the layer was written. False only with `--require-recordings` when an expected recording is not uploaded (the layer was still written; the exit code is then 1)'),
   store: z.string().describe('Where it was written: a folder, `s3://…` or a server URL'),
   layer: PublishedLayerSchema,
+  layers: z.array(PublishedLayerSchema).optional().describe('All pieces in publication order when a server body limit requires multiple layers. The first piece is also returned in layer.'),
   specSet: z.looseObject({ id: z.string(), files: z.number().int().nonnegative(), branch: z.string().nullable() }).optional().describe('Present when `--specs` was given'),
   run: z.looseObject({ id: z.string(), files: z.number().int().nonnegative(), bytes: z.number().int().nonnegative(), alreadyPublished: z.boolean() }).optional().describe('Present with `--upload-run`'),
   recordings: z.looseObject({

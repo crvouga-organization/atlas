@@ -4,13 +4,13 @@
  * An `ObjectStore` on Vercel Blob, written without the `@vercel/blob` SDK: its HTTP API is called with `fetch`, the
  * same way the S3 store signs its own requests, so it adds nothing to the install and runs on Bun and Node. Objects
  * are private and kept under their exact keys (no random suffix, overwrite allowed, so a retried write lands on the
- * same key with the same bytes), and are read back with the store's token. `getUri` never returns a URL that works
- * without the token: it answers `null`, and the server streams the bytes instead. Importing the module does no work.
+ * same key with the same bytes), and are read back with the store's token. `getUri` returns a signed read URL for one object
+ * with a lifetime of at most five minutes. Importing the module does no work.
  *
  * @see docs/deploying.md#vercel-blob
  * @see docs/report-contract.md#backends
  */
-import type { ObjectStore, PagedListing, SignedDownloads, StoredObject } from './object-store';
+import type { ConditionalWrites, ObjectStore, PagedListing, SignedDownloads, StagedUploads, StoredObject } from './object-store';
 import { ObjectStoreWithPrefix } from './store-prefix';
 
 /** How to reach a Blob store. Everything is optional: the token comes from `BLOB_READ_WRITE_TOKEN` by default. */
@@ -48,7 +48,7 @@ export class VercelBlobError extends Error {
 }
 
 /** An `ObjectStore` on Vercel Blob with paged listing, a secret-free label, and a cheap reachability check. */
-export type VercelBlobStore = ObjectStore & PagedListing & SignedDownloads & {
+export type VercelBlobStore = ObjectStore & ConditionalWrites & StagedUploads & PagedListing & SignedDownloads & {
   /** A description with no secrets: `vercel-blob://my-project/ (store abc123)`. */
   readonly label: string;
   /**
@@ -132,8 +132,7 @@ function hint(code: string | null, status: number | null, where: string): string
  *
  * Behaviour to know: the constructor throws when there is no token, or the token is not a read-write token (the store
  * id is read from it). `signedUrl` returns a presigned read URL of one object, valid as long as asked (at most the
- * hour-long delegation it is signed from), with the stored type and size. `getUri` always answers `null`: a private object has no URL that works without the token, and a
- * permanently public one is never handed out. `listKeys` pages through the whole listing and sorts it. `listPage`
+ * hour-long delegation it is signed from), with the stored type and size. `getUri` signs one object for at most five minutes and returns null for a missing key. `listKeys` pages through the whole listing and sorts it. `listPage`
  * continues from the service's cursor when it is asked for the page after the one it last returned, and otherwise
  * lists the prefix and filters it, so it is always correct and usually one request. `deleteMany` sends 100 keys per request.
  *
@@ -227,7 +226,7 @@ export function vercelBlobStore(options: VercelBlobStoreOptions = {}): VercelBlo
       // `cache=0` reads the object as stored now, not as a CDN cached it before an overwrite.
       const response = await send(`${content}/${encode(base + key)}?cache=0`, { method: 'GET', allow404: true }, key);
       if (!response) return null;
-      return { body: response.body ?? new Blob([]).stream(), contentType: response.headers.get('content-type') ?? 'application/octet-stream', size: Number(response.headers.get('content-length') ?? 0) };
+      return { etag: response.headers.get('etag') ?? undefined, body: response.body ?? new Blob([]).stream(), contentType: response.headers.get('content-type') ?? 'application/octet-stream', size: Number(response.headers.get('content-length') ?? 0) };
     },
 
     async put(key, bytes, contentType) {
@@ -237,6 +236,22 @@ export function vercelBlobStore(options: VercelBlobStoreOptions = {}): VercelBlo
         headers: { 'x-vercel-blob-access': 'private', 'x-content-type': contentType, 'x-add-random-suffix': '0', 'x-allow-overwrite': '1' }
       }, key);
       await response?.arrayBuffer();
+    },
+
+    async putConditional(key, bytes, contentType, expected) {
+      try {
+        const response = await send(`${api}/?${new URLSearchParams({ pathname: base + key })}`, {
+          method: 'PUT', body: bytes,
+          headers: { 'x-vercel-blob-access': 'private', 'x-content-type': contentType, 'x-add-random-suffix': '0',
+            ...(expected === null ? { 'x-allow-overwrite': '0' } : { 'x-allow-overwrite': '1', 'x-if-match': expected }) }
+        }, key);
+        await response?.body?.cancel();
+        return true;
+      } catch (error) {
+        if (error instanceof VercelBlobError && (error.status === 412 || error.code === 'precondition_failed' ||
+          (expected === null && /already exists/i.test(error.message)))) return false;
+        throw error;
+      }
     },
 
     async head(key) {
@@ -257,9 +272,8 @@ export function vercelBlobStore(options: VercelBlobStoreOptions = {}): VercelBlo
       }
     },
 
-    async getUri() {
-      // A private object has no URL that works without the token, and a public one is never handed out.
-      return null;
+    async getUri(key) {
+      return (await store.signedUrl(key, { expiresInSeconds: 300 }))?.url ?? null;
     },
 
     async signedUrl(key, options) {
@@ -310,6 +324,14 @@ export function vercelBlobStore(options: VercelBlobStoreOptions = {}): VercelBlo
 
     withPrefix(extra) {
       return new ObjectStoreWithPrefix(store, extra);
+    },
+
+    stagedUploadTarget(key, upload) {
+      return store.uploadTarget(key, { ...upload, validForMs: 300_000 });
+    },
+
+    putIfAbsent(key, bytes, contentType) {
+      return store.putConditional(key, bytes, contentType, null);
     },
 
     async uploadTarget(key, upload) {

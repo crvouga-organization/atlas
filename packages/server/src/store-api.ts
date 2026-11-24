@@ -13,7 +13,8 @@
 
 import { Hono, type Context } from 'hono';
 
-import { isPaged, type ObjectStore } from '../../reports/src/object-store';
+import { stagedUpload } from './staged-upload';
+import { isPaged, type ObjectStore, type StagedUploads } from '../../reports/src/object-store';
 import { readBytes } from '../../reports/src/object-io';
 import { UNTRUSTED_HEADERS } from '../../reports/src/attachment-response';
 import type { ReportLayer } from '../../reports/src/layer-types';
@@ -33,6 +34,8 @@ export type StoreApiOptions = {
    * request bodies). Without it, `POST /api/store/<key>?upload=…` answers 404 and publishers upload through the server.
    */
   readonly direct?: DirectUploads;
+  /** Storage that signs temporary PUTs and atomically creates verified objects. */
+  readonly staged?: ObjectStore & StagedUploads;
 };
 
 /** A request a publisher makes to the storage itself: what `POST /api/store/<key>?upload=start` answers. */
@@ -45,7 +48,7 @@ export type DirectUploads = { target(key: string, upload: { readonly size: numbe
 const DIRECT_KINDS = new Set(['blob', 'run-file']);
 
 /** Read a request body, refusing as soon as it is over the limit rather than after holding it all. */
-export async function readLimited(request: Request, limit: number): Promise<Uint8Array> {
+export async function readLimited(request: Request | Response, limit: number): Promise<Uint8Array> {
   const declared = Number(request.headers.get('content-length') ?? NaN);
   if (Number.isFinite(declared) && declared > limit) throw new Refusal(413, `That is ${declared} bytes; the limit is ${limit}`);
   if (!request.body) return new Uint8Array();
@@ -172,15 +175,33 @@ export function storeApi(options: StoreApiOptions) {
     const name = key(c);
     if (name === null || !validKey(name)) return refuse(c, 422, 'Not a key Atlas holds');
     try {
-      const bytes = await readLimited(c.req.raw, options.maxObjectBytes);
+      let bytes = await readLimited(c.req.raw, options.maxObjectBytes);
+      if (c.req.header('x-atlas-compression') === 'gzip') {
+        if (classify(name)?.kind !== 'layer') throw new Refusal(422, 'Gzip transport is supported for layer manifests.');
+        try {
+          const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new DecompressionStream('gzip'));
+          bytes = await readLimited(new Response(stream), options.maxObjectBytes);
+        } catch (error) {
+          if (error instanceof Refusal) throw error;
+          throw new Refusal(422, 'Invalid gzip manifest.');
+        }
+      }
       return await exclusive(name, async () => {
         if (verdict.identity.role === 'critic') await assertCriticMayStore(name, bytes, store);
         const kind = await validateUpload(name, bytes, store, layer => { recent.set(layer.id, layer); if (recent.size > 8) recent.delete(recent.keys().next().value!); });
         // A blob's name is the digest of what is in it, which was just checked: one that is there is this one, however it was compressed.
-        const present = kind === 'blob' && (await store.head(name)) ? 'same' : await sameBytes(store, name, bytes);
+        let present = kind === 'blob' && (await store.head(name)) ? 'same' : await sameBytes(store, name, bytes);
         // Scratch objects may be overwritten (an object store's contract says writing a key twice is fine); layers may not.
         if (present === 'different' && kind !== 'scratch') throw new Refusal(409, `${name} already exists with other content. Layers are immutable: publish a new one.`);
-        if (present !== 'same') await store.put(name, bytes, c.req.header('content-type') ?? 'application/octet-stream');
+        if (present !== 'same') {
+          const type = c.req.header('content-type') ?? 'application/octet-stream';
+          if (options.staged && DIRECT_KINDS.has(kind)) {
+            if (!await options.staged.putIfAbsent(name, bytes, type)) {
+              if (kind !== 'blob' && await sameBytes(store, name, bytes) !== 'same') throw new Refusal(409, 'An immutable file already exists with different content.');
+              present = 'same';
+            }
+          } else await store.put(name, bytes, type);
+        }
         // Catalog entries make a layer, spec set or run visible, so everyone is told only once they are in.
         if (present === 'absent' || isCatalog(kind)) await options.onStored(name, kind, kind === 'layer-catalog' ? recent.get(classify(name)?.id ?? '') : undefined);
         return c.json({ ok: true, key: name, kind, created: present === 'absent' }, present === 'absent' ? 201 : 200);
@@ -197,20 +218,31 @@ export function storeApi(options: StoreApiOptions) {
     const verdict = auth.check(c.req.raw, 'publish');
     if (!verdict.ok) return refuse(c, verdict.status, verdict.message);
     const step = c.req.query('upload');
-    if (!options.direct || (step !== 'start' && step !== 'complete')) return refuse(c, 404, 'This server takes uploads in the request body: PUT /api/store/<key>');
+    if ((!options.direct && !options.staged) || (step !== 'start' && step !== 'complete')) return refuse(c, 404, 'This server takes uploads in the request body: PUT /api/store/<key>');
     const name = key(c);
     if (name === null || !validKey(name)) return refuse(c, 422, 'Not a key Atlas holds');
     const kind = classify(name)?.kind;
     if (!kind || !DIRECT_KINDS.has(kind)) return refuse(c, 422, 'Only files (blobs and run files) go straight to storage; upload the rest with PUT');
+    const descriptor = await c.req.json().catch(() => null);
+    if (options.staged) {
+      try {
+        const legacyOwner = descriptor?.sha256 === undefined && options.direct ? verdict.identity.name : undefined;
+        const result = await stagedUpload(options.staged, name, step, descriptor, options.maxObjectBytes, legacyOwner);
+        return c.json(result, result.created ? 201 : 200, { 'cache-control': 'no-store' });
+      } catch (error) {
+        if (error instanceof Refusal) return refuse(c, error.status, error.message);
+        throw error;
+      }
+    }
     if (step === 'start') {
-      const body = await c.req.json().catch(() => null) as { size?: unknown; contentType?: unknown } | null;
+      const body = descriptor as { size?: unknown; contentType?: unknown } | null;
       const size = Number(body?.size);
       const contentType = typeof body?.contentType === 'string' && /^[\w.+-]+\/[\w.+-]+/.test(body.contentType) ? body.contentType : 'application/octet-stream';
       if (!Number.isSafeInteger(size) || size < 0) return refuse(c, 422, 'Say the size of the file in bytes');
       if (size > options.maxObjectBytes) return refuse(c, 413, `An object may be at most ${Math.floor(options.maxObjectBytes / 1048576)} MiB`);
       // A blob is named for its content: one already there is this one, and needs no bytes.
       if (kind === 'blob' && (await store.head(name))) return c.json({ exists: true });
-      return c.json({ exists: false, ...(await options.direct.target(name, { size, contentType })) }, 200, { 'cache-control': 'no-store' });
+      return c.json({ exists: false, ...(await options.direct!.target(name, { size, contentType })) }, 200, { 'cache-control': 'no-store' });
     }
     try {
       return await exclusive(name, async () => {

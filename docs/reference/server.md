@@ -44,6 +44,8 @@ export type AtlasServerOptions = {
    * relying on timers. Unset: timers do it.
    */
   readonly refreshOnRequestMs?: number;
+  /** Refresh project discovery during an open serverless event stream. */
+  readonly pollProjects?: () => Promise<void>;
   /** How often (ms) at most the report checkpoint is written after a change. Default 5 minutes; a serverless host, whose instances are short-lived, wants it sooner. */
   readonly checkpointEveryMs?: number;
   /** End each live stream after this many milliseconds, so a host's maximum request duration never cuts one; the viewer reconnects. */
@@ -57,8 +59,6 @@ export type AtlasServerOptions = {
   readonly directUploadOverBytes?: number;
   /**
    * Send a browser playing or downloading a run's recording (video, audio, a trace zip) straight to the store, with a
-   * `302` to a URL that works for five minutes, when the store can sign one (S3, Vercel Blob). Off: every byte goes
-   * through the server. Worth it where the server is a function billed by the second; a store whose address browsers
   …
 ```
 
@@ -446,8 +446,8 @@ request, scheduled pass or poll. Each project's part is applied with `stepGarbag
 too (`server/gc/runs/<id>/<project>/`), so a pass that stops or is killed is finished by the next step, never started
 over, and never deletes more than one unbounded pass would. The time a pass judges ages against is fixed when it starts.
 
-Two instances could try to advance one pass at once: a lease in the pass record keeps them apart (the store has no
-conditional writes, so the lease is written, then read back). What each batch found is written before it acts, so
+Two instances could try to advance one pass at once: Blob and S3 atomically claim a version of the pass record.
+Other stores confirm the lease by reading it back. What each batch found is written before it acts, so
 even an overlap repeats idempotent work rather than deleting anything that is still used.
 
 See docs/server.md#user-state-and-garbage-collection
@@ -623,7 +623,7 @@ const live = new LiveRuns({ store, timeoutMs: 30_000, stalledMs: 900_000, onChan
 - `async start(input: Start, owner: string): Promise<LiveRun>` — Register one producer lease. Retrying an identical start is idempotent.
 - `async heartbeat(id: string, owner: string): Promise<void>` — Renew liveness by server receipt time, independently of whether a test made progress.
 - `async update(id: string, input: Update, owner: string): Promise<LiveRun>` — Apply one ordered progress batch and publish its completed checks before acknowledging it.
-- `async compact(id: string, owner: string, final: ReportLayer, eligible: ReadonlySet<string>, forget: (ids: ReadonlySet<string>) => Promise<void>): Promise<void>` — Remove progress layers that a durable final layer of this completed invocation supersedes in every slot.
+- `async compact(id: string, owner: string, final: ReportLayer | readonly ReportLayer[], eligible: ReadonlySet<string>, forget: (ids: ReadonlySet<string>) => Promise<void>): Promise<void>` — Remove progress layers that a durable final layer of this completed invocation supersedes in every slot.
 - `async sweep(): Promise<void>` — Expire silent producers and optional progress stalls. Heartbeats cannot revive an expired run.
 
 ### llms.txt of a running server
@@ -1132,6 +1132,22 @@ export async function findSite(named: string | undefined, cwd: string, log: (tex
 
 The client to serve: the one named, a build beside the project, or one built into the user's cache.
 
+### staged-upload.ts
+
+Source: `packages/server/src/staged-upload.ts`
+
+@module Validated staged uploads
+A publisher sends bytes directly to a private scratch key. Completion verifies them and creates the immutable
+destination only if absent. The descriptor determines the staging key, so retries can use a different instance.
+
+#### `stagedUpload`
+
+```ts
+export async function stagedUpload(store: ObjectStore & StagedUploads, name: string, step: 'start' | 'complete', input: unknown, limit: number)
+```
+
+Verify an upload descriptor at both negotiation and completion. Returns an idempotent target or completion receipt.
+
 ### Required object storage configuration
 
 Source: `packages/server/src/storage.ts`
@@ -1346,6 +1362,8 @@ export type StoreApiOptions = {
    * request bodies). Without it, `POST /api/store/<key>?upload=…` answers 404 and publishers upload through the server.
    */
   readonly direct?: DirectUploads;
+  /** Storage that signs temporary PUTs and atomically creates verified objects. */
+  readonly staged?: ObjectStore & StagedUploads;
 };
 ```
 
@@ -1370,7 +1388,7 @@ How the storage takes a file straight from a publisher: a short-lived request go
 #### `readLimited`
 
 ```ts
-export async function readLimited(request: Request, limit: number): Promise<Uint8Array>
+export async function readLimited(request: Request | Response, limit: number): Promise<Uint8Array>
 ```
 
 Read a request body, refusing as soon as it is over the limit rather than after holding it all.
@@ -1552,6 +1570,8 @@ A refused queue request: 403 another shard's claim, 404 an unknown definition, 4
 export type CatalogQueueOptions = {
   /** Where definitions and the queue document are kept: the server's store, scoped to the project. */
   readonly store: ObjectStore;
+  /** Share claims through atomic storage revisions across serverless instances. */
+  readonly shared?: boolean;
   /** The report as it stands, to read results from. */
   readonly snapshot: () => EffectiveEvidence;
   /** Publish a definition's plan layers into the report. */
@@ -1687,8 +1707,8 @@ one JSON object at `server/state.json` in the object store, which in a running s
 only place user state is kept: not a file, not a database, not the browser. A missing object is an empty state
 ("nothing chosen yet"); an object that cannot be read or does not match the schema is an error that stops the
 server from starting and is never overwritten, so a transient or corrupt read can never silently reset anyone's choices.
-Saving refuses a stale revision (the SHA-256 of the stored text), serialised within this process. An object store has
-no conditional writes, so two servers saving at the same instant could still race; run one server per bucket.
+Saving refuses a stale revision (the SHA-256 of the stored text), serialised within this process. An object store supports
+optional conditional writes. Blob and S3 reject a concurrent change to the version this save read.
 
 See docs/server.md#user-state-and-garbage-collection
 

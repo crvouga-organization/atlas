@@ -2680,7 +2680,7 @@ points at a missing file; keep `maxAgeDays` well above the time uploads take.
 same-origin in browsers) read and save the policy; `POST /api/settings/gc/run` applies it now, and
 `POST /api/settings/gc/run?dryRun=1` only counts what would go. A save that races another is refused with 409. The
 revision is the SHA-256 of the stored document, so saving the policy and saving settings invalidate each other's
-revision: reload, then save. An object store has no conditional writes, so run one server per bucket.
+revision: reload, then save. Blob and S3 compare the stored object version on save, including when requests reach different instances.
 
 **Passes.** Applying a policy to tens of thousands of layers takes longer than a proxy or a serverless function lets a
 request last, so it runs as a **pass** kept in the store (`server/gc/runs/<id>.json`) rather than inside the request:
@@ -3616,12 +3616,19 @@ What changes on a function host, and what does not:
   `/api/cron` run (Vercel Cron, with `CRON_SECRET`; or the admin token) applies a saved garbage collection policy when it is due.
 - **Large files go straight to Blob.** A function accepts about 4.5 MB per request, so `GET /api/server` says
   `uploads.directOverBytes` (4 MiB; `ATLAS_DIRECT_UPLOAD_OVER_BYTES`). A publisher sends larger files to Blob with a
-  one-time token good for that one key, size and type, and the server checks what arrived as it checks any upload.
+  short-lived token for one key, size limit and type. Current publishers send the bytes to a private staging key on Blob or S3.
+  Completion verifies the declared hash, size and type before creating the immutable destination. Configure an S3
+  lifecycle rule to expire abandoned objects under each project's `server/uploads/` prefix.
+- When the server advertises `uploads.gzipManifests`, the HTTP publisher compresses large manifests that shrink.
+  If the host still returns HTTP 413, `atlas report publish --checks` splits the checks across immutable layers.
+  Its JSON result then includes each piece in `layers`, with the first piece also in `layer`. A single check that
+  exceeds the limit fails the publication.
 - **Recordings play from Blob.** A browser playing or downloading a run's video, audio or trace zip is sent to the Blob
   store with a URL that works for five minutes, after its read access was checked, so seeking through a long video costs
   the function nothing. Pages, SVG, images and anything requested by a script still come through the function, sandboxed.
   `ATLAS_REDIRECT_DOWNLOADS=0` keeps every byte in the function. Attachments of test results are packed into compressed
   chunks of several files each, so they are always served by the function.
+- Serverless live-run requests read their lease from storage. Conditional writes reserve a sequence before publication, so a cold instance can resume a retry and competing progress messages cannot both win.
 - **Live updates** come over a stream the server ends after 4 minutes (`ATLAS_STREAM_MAX_SECONDS`), before the
   function's time limit; the viewer reconnects by itself.
 - The template builds the viewer into `public/` with `--api-base /api`. Vercel serves the viewer and its assets from the CDN. API calls, probes and the settings page reach the function.
@@ -7810,9 +7817,10 @@ Responses: `200` Already there with the same bytes.; `201` Stored.; `401` No tok
 
 For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.
 
-1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
+For a manifest PUT, a server advertising `uploads.gzipManifests` accepts `X-Atlas-Compression: gzip` and validates the decompressed manifest against its size limit.
+1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…", "sha256": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
 2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).
-3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
+3. `POST /api/store/<key>?upload=complete`. If start returned `staged: true`, repeat the start body. The server verifies staged bytes before creating the destination. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
 
 Only files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.
 
@@ -7828,9 +7836,10 @@ Responses: `200` `start`: where to send the bytes, or that the blob is already t
 
 For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.
 
-1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
+For a manifest PUT, a server advertising `uploads.gzipManifests` accepts `X-Atlas-Compression: gzip` and validates the decompressed manifest against its size limit.
+1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…", "sha256": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
 2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).
-3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
+3. `POST /api/store/<key>?upload=complete`. If start returned `staged: true`, repeat the start body. The server verifies staged bytes before creating the destination. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
 
 Only files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.
 

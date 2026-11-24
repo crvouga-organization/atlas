@@ -34,8 +34,12 @@ suite('vercelBlobStore against Vercel Blob', () => {
       // An overwrite is read back at once.
       await store.put('server/state.json', new TextEncoder().encode('2'), 'application/json');
       expect(await new Response((await store.get('server/state.json'))!.body).text()).toBe('2');
-      // A private object cannot be read without the token, and no URL is handed out.
-      expect(await store.getUri('server/state.json')).toBeNull();
+      const address = new URL((await store.getUri('server/state.json'))!);
+      expect(await (await fetch(address)).text()).toBe('2');
+      address.search = '';
+      const unsigned = await fetch(address);
+      expect(unsigned.ok).toBe(false);
+      await unsigned.body?.cancel();
     } finally {
       await store.deleteMany(keys);
     }

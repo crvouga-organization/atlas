@@ -116,10 +116,10 @@ export async function signRequest(input: SignInput): Promise<Record<string, stri
 }
 
 /**
- * A query-signed URL anyone can GET until it expires, without credentials: for handing a file to a browser. Valid for
- * `expiresSeconds` from `at`; signs only the `host` header and an unsigned payload, so it works for `GET` only.
+ * A query-signed URL for one key. By default it signs a GET for a browser. A staging PUT binds its upload headers. Valid for
+ * `expiresSeconds` from `at`.
  */
-export async function presignUrl(input: { readonly url: URL; readonly credentials: Credentials; readonly region: string; readonly service: string; readonly at: Date; readonly expiresSeconds: number }): Promise<string> {
+export async function presignUrl(input: { readonly url: URL; readonly credentials: Credentials; readonly region: string; readonly service: string; readonly at: Date; readonly expiresSeconds: number; readonly upload?: { size: number; contentType: string } }): Promise<string> {
   const { date, datetime } = amzDate(input.at);
   const scope = `${date}/${input.region}/${input.service}/aws4_request`;
   const url = new URL(input.url);
@@ -127,10 +127,17 @@ export async function presignUrl(input: { readonly url: URL; readonly credential
   url.searchParams.set('X-Amz-Credential', `${input.credentials.accessKeyId}/${scope}`);
   url.searchParams.set('X-Amz-Date', datetime);
   url.searchParams.set('X-Amz-Expires', String(input.expiresSeconds));
-  url.searchParams.set('X-Amz-SignedHeaders', 'host');
+  const headers: Record<string, string> = { host: url.host };
+  if (input.upload) {
+    headers['content-length'] = String(input.upload.size);
+    headers['content-type'] = input.upload.contentType;
+  }
+  const names = Object.keys(headers).sort();
+  const signed = names.join(';');
+  url.searchParams.set('X-Amz-SignedHeaders', signed);
   if (input.credentials.sessionToken) url.searchParams.set('X-Amz-Security-Token', input.credentials.sessionToken);
   const path = url.pathname.split('/').map(segment => uriEncode(decodeURIComponent(segment))).join('/') || '/';
-  const canonical = ['GET', path, canonicalQuery(url.searchParams), `host:${url.host}\n`, 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+  const canonical = [input.upload ? 'PUT' : 'GET', path, canonicalQuery(url.searchParams), names.map(name => `${name}:${headers[name]}\n`).join(''), signed, 'UNSIGNED-PAYLOAD'].join('\n');
   const toSign = ['AWS4-HMAC-SHA256', datetime, scope, await sha256Hex(canonical)].join('\n');
   url.searchParams.set('X-Amz-Signature', hex(await hmac(await signingKey(input.credentials.secretAccessKey, date, input.region, input.service), toSign)));
   return url.toString();

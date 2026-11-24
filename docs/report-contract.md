@@ -291,7 +291,7 @@ Atlas ships three backends, each named by one URL (`openStore`, `--store`, `ATLA
   the bucket, so publishers need `s3:ListBucket` too (`atlas report policy` prints the permissions).
 - `vercelBlobStore({ token, prefix })` (`@crvouga/atlas/reports/vercel-blob-store`): a private Vercel Blob store,
   written without the SDK. `vercel-blob://folder`, with the token in `BLOB_READ_WRITE_TOKEN`. Objects are private and
-  kept under their exact keys; `getUri` is always `null`, since a private object has no URL that works without the token
+  kept under their exact keys. `getUri` signs a read URL for one object for up to five minutes
   ([details](deploying.md#vercel-blob)).
 
 For anything else, write an adapter and prove it:

@@ -182,7 +182,7 @@ points at a missing file; keep `maxAgeDays` well above the time uploads take.
 same-origin in browsers) read and save the policy; `POST /api/settings/gc/run` applies it now, and
 `POST /api/settings/gc/run?dryRun=1` only counts what would go. A save that races another is refused with 409. The
 revision is the SHA-256 of the stored document, so saving the policy and saving settings invalidate each other's
-revision: reload, then save. An object store has no conditional writes, so run one server per bucket.
+revision: reload, then save. Blob and S3 compare the stored object version on save, including when requests reach different instances.
 
 **Passes.** Applying a policy to tens of thousands of layers takes longer than a proxy or a serverless function lets a
 request last, so it runs as a **pass** kept in the store (`server/gc/runs/<id>.json`) rather than inside the request:
