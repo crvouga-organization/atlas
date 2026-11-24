@@ -3693,6 +3693,12 @@ missing manifest; its manifest next; then the captured-file blobs that no remain
 layer cannot be read, no blob is deleted: what cannot be read is unknown, never unused. Specs, runs and commit
 inventories are not touched.
 
+A pass can run in bounded steps (`stepGarbage`): it works in batches of layers, writes what each batch found to a
+scratch place before deleting anything, and stops starting batches when its deadline passes. The next step continues
+from there, so a host that ends long requests (a serverless function) still finishes the pass, a pass killed midway is
+finished by the next one, and the steps together delete exactly what one unbounded pass would. A dry run walks the
+same steps without deleting, so it reports what a real pass would delete: layers, blobs and bytes.
+
 See docs/server.md#user-state-and-garbage-collection
 
 #### `GcCandidate`
@@ -3711,6 +3717,8 @@ export type GcPlan = {
   readonly candidates: readonly GcCandidate[];
   /** Layers in the catalog that stay. */
   readonly kept: number;
+  /** The ids of the layers that stay, when `planGarbage` made the plan: what a pass reads to keep the blobs they use. */
+  readonly remaining?: readonly string[];
 };
 ```
 
@@ -3719,10 +3727,12 @@ What a policy would delete from a store right now.
 #### `GcOutcome`
 
 ```ts
-export type GcOutcome = { readonly deletedLayers: number; readonly deletedBlobs: number };
+export type GcOutcome = { readonly deletedLayers: number; readonly deletedBlobs: number; readonly candidateBlobs?: number; readonly candidateBytes?: number; readonly deletedBytes?: number };
 ```
 
-The outcome of applying a plan.
+The outcome of applying a plan. `candidateBlobs` and `candidateBytes` are what the pass found to delete (the blobs only
+the deleted layers used, and the bytes of those blobs and of the layers' manifests), the same for a dry run as for a
+real one; `deletedBytes` is what a real pass removed (0 for a dry run).
 
 #### `planGarbage`
 
@@ -3740,15 +3750,109 @@ Lists the catalog only. With `policy.enabled === false` the plan is empty.
 const plan = await planGarbage(store, { policy, nowMs: Date.now(), eligible: index.superseded() });
 ```
 
+#### `GcScratch`
+
+```ts
+export type GcScratch = {
+  /** A document written earlier, or null. */
+  read<T>(name: string): Promise<T | null>;
+  /** Writes (or replaces) a document. */
+  write(name: string, value: unknown): Promise<void>;
+  /** Removes everything this pass wrote. */
+  clear(): Promise<void>;
+};
+```
+
+Where a bounded pass keeps what it has found between steps: small JSON documents by name. `storeScratch` keeps them in
+a store under a prefix (so another process can continue the pass); `memoryScratch` keeps them for one call.
+
+#### `storeScratch`
+
+```ts
+export function storeScratch(store: ObjectStore, prefix: string): GcScratch
+```
+
+Scratch documents in `store` under `prefix`, so a pass can be continued by another process.
+
+#### `memoryScratch`
+
+```ts
+export function memoryScratch(): GcScratch
+```
+
+Scratch documents in memory, for a pass that runs to the end in one call.
+
+#### `GcStep`
+
+```ts
+export type GcStep = GcOutcome & {
+  readonly done: boolean;
+  readonly phase: 'layers' | 'scan' | 'blobs' | 'done';
+  readonly candidates: number;
+  /** Candidate layers examined (and, in a real pass, deleted) so far. */
+  readonly layersExamined: number;
+  /** Remaining layers read so far, to find the blobs they still use. */
+  readonly layersScanned: number;
+  /** True when a layer could not be read, so no blob is deleted: what cannot be read is unknown, never unused. */
+  readonly unreadable: boolean;
+};
+```
+
+How far a bounded pass over one store has come. When `done`, nothing is left and the counts are final.
+
+#### `GcStepOptions`
+
+```ts
+export type GcStepOptions = {
+  /** Count and report, delete nothing. */
+  readonly dryRun?: boolean;
+  /** Start no new batch once the clock passes this (epoch ms). Default: never stop early. */
+  readonly deadline?: number;
+  /** The clock the deadline is read with. Default `Date.now`. */
+  readonly now?: () => number;
+  /** Layers or blobs per batch. Default 50. */
+  readonly batch?: number;
+  /** Told after every batch, with the progress so far. */
+  readonly onBatch?: (progress: GcStep) => void | Promise<void>;
+};
+```
+
+Options of one step of a bounded pass.
+
+#### `stepGarbage`
+
+```ts
+export async function stepGarbage(store: ObjectStore, scratch: GcScratch, plan: GcPlan, options: GcStepOptions = {}): Promise<GcStep>
+```
+
+One bounded step of applying a plan, continuing from what `scratch` holds. Batches of candidate layers are read (the
+blobs they use and their sizes written to scratch first) and then deleted, catalog entry first; then the remaining
+layers are read to see which blobs they still use; then the blobs only the deleted layers used are counted and deleted.
+What each batch found is written before anything is deleted and every delete is idempotent, so a step that is stopped
+or killed is finished by the next, and the steps together delete exactly what one unbounded pass would. Layers
+published after the plan are read before any blob is deleted, so a blob a new layer uses is kept. No new batch starts
+after `deadline`.
+
+Give every step of one pass the same `plan` (with `remaining`) and the same scratch; the server keeps both in the store.
+
+**Example**
+
+```ts
+const scratch = storeScratch(store, 'server/gc/runs/abc/default/');
+let step;
+do step = await stepGarbage(store, scratch, plan, { deadline: Date.now() + 60_000 }); while (!step.done);
+```
+
 #### `collectGarbage`
 
 ```ts
-export async function collectGarbage(store: ObjectStore, plan: GcPlan): Promise<GcOutcome>
+export async function collectGarbage(store: ObjectStore, plan: GcPlan, options: { readonly dryRun?: boolean } = {}): Promise<GcOutcome>
 ```
 
-Deletes the layers of a plan, then the blobs only they used. Store errors throw after whatever was already deleted;
-running the same plan again finishes the job, because every delete is idempotent and the catalog entry (what
-makes a layer visible) always goes before the content.
+Applies a plan in one call: the unbounded form of {@link stepGarbage}, with what it finds kept in memory. Deletes the
+layers of the plan, then the blobs only they used; with `dryRun` it deletes nothing and only counts. Store errors throw
+after whatever was already deleted; running the same plan again finishes the job, because every delete is idempotent
+and the catalog entry (what makes a layer visible) always goes before the content.
 
 ### URL hash routes of the reports viewer
 

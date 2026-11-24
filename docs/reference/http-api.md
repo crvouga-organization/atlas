@@ -152,11 +152,26 @@ Responses: `200` The saved policy and the new revision.; `401` No token, or an u
 
 `POST /api/settings/gc/run` · role: admin
 
-Applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what it would delete (a disabled policy is previewed as if enabled). Answers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.
+Starts a pass that applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what a real pass would delete: layers, blobs (`candidateBlobs`) and bytes (`candidateBytes`). A disabled policy is previewed as if enabled.
+
+The pass runs in the background and is kept in the store. The answer is the pass: `200` with every run once it is done (a small pass is done before the answer), `202` with `Location: /api/settings/gc/runs/{id}` to poll while it runs. `wait=1` waits for the end, as this operation did before passes existed. There is only one pass at a time: asking again while one runs answers that one. On a host that bounds requests (serverless), each request carries the pass on for a limited time and the next request, poll or scheduled pass continues it.
+
+Answers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.
 
 - `dryRun` (query): `1` or `true` to only count what would be deleted.
+- `wait` (query): `1` or `true` to answer only when the pass is done.
 
-Responses: `200` One run per project.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `409` No policy has been saved, or it is disabled.
+Responses: `200` The finished pass, with one run per project.; `202` The pass, still running: poll its `Location`.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `409` No policy has been saved, or it is disabled.
+
+### How far a garbage collection pass has come
+
+`GET /api/settings/gc/runs/{id}` · role: admin
+
+A pass by its id: `running`, `done` or `failed`, its progress (projects, the phase of the current one, layers examined and deleted, blobs, bytes) and the runs of the projects finished so far. `200` once it is done, `202` while it runs. A running pass that no process is carrying on (its step ran out of time, or its server restarted) is carried on by this request: in the background on a long-running server, for a bounded time on a serverless host. Finished passes are kept for a while, then forgotten (`404`).
+
+- `id` (path, required): The pass id from `POST /api/settings/gc/run`.
+
+Responses: `200` The finished pass.; `202` The pass, still running.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `404` No such pass.
 
 ### Is the process up
 

@@ -1375,7 +1375,7 @@
           "Operations"
         ],
         "summary": "Collect garbage now, or preview it",
-        "description": "Applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what it would delete (a disabled policy is previewed as if enabled). Answers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.\n\nRole needed: `admin`.",
+        "description": "Starts a pass that applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what a real pass would delete: layers, blobs (`candidateBlobs`) and bytes (`candidateBytes`). A disabled policy is previewed as if enabled.\n\nThe pass runs in the background and is kept in the store. The answer is the pass: `200` with every run once it is done (a small pass is done before the answer), `202` with `Location: /api/settings/gc/runs/{id}` to poll while it runs. `wait=1` waits for the end, as this operation did before passes existed. There is only one pass at a time: asking again while one runs answers that one. On a host that bounds requests (serverless), each request carries the pass on for a limited time and the next request, poll or scheduled pass continues it.\n\nAnswers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.\n\nRole needed: `admin`.",
         "x-atlas-role": "admin",
         "security": [
           {
@@ -1391,11 +1391,30 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "required": false,
+            "name": "wait",
+            "in": "query",
+            "description": "`1` or `true` to answer only when the pass is done.",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "One run per project.",
+            "description": "The finished pass, with one run per project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcRunResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The pass, still running: poll its `Location`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1426,6 +1445,85 @@
           },
           "409": {
             "description": "No policy has been saved, or it is disabled.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/settings/gc/runs/{id}": {
+      "get": {
+        "operationId": "getGarbageCollectionPass",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "How far a garbage collection pass has come",
+        "description": "A pass by its id: `running`, `done` or `failed`, its progress (projects, the phase of the current one, layers examined and deleted, blobs, bytes) and the runs of the projects finished so far. `200` once it is done, `202` while it runs. A running pass that no process is carrying on (its step ran out of time, or its server restarted) is carried on by this request: in the background on a long-running server, for a bounded time on a serverless host. Finished passes are kept for a while, then forgotten (`404`).\n\nRole needed: `admin`.",
+        "x-atlas-role": "admin",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "required": true,
+            "name": "id",
+            "in": "path",
+            "description": "The pass id from `POST /api/settings/gc/run`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The finished pass.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcRunResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The pass, still running.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcRunResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one. Send `Authorization: Bearer <token>`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is known but its role may not do this.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such pass.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -14191,6 +14289,24 @@
                 "error": {
                   "description": "Why the pass stopped early, when it did",
                   "type": "string"
+                },
+                "candidateBlobs": {
+                  "description": "Captured-file blobs only the deleted layers used: what a real pass deletes (and did delete, unless a layer could not be read). The same in a dry run. Absent from a server that predates it",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "candidateBytes": {
+                  "description": "Bytes of those blobs and of the deleted layers' manifests: what a real pass frees. The same in a dry run",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "deletedBytes": {
+                  "description": "Bytes a real pass removed; 0 for a dry run",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
                 }
               },
               "required": [
@@ -14209,6 +14325,217 @@
           "stateKey": {
             "type": "string",
             "description": "Where the user state lives in the bucket, relative to the configured prefix"
+          },
+          "currentPass": {
+            "description": "The pass running now, or null. Absent from a server that predates passes",
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9-]{8,64}$"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "running",
+                      "done",
+                      "failed"
+                    ],
+                    "description": "`running` until every project is collected; a pass that stops midway is continued by the next request, scheduled pass or step, never started over"
+                  },
+                  "dryRun": {
+                    "type": "boolean"
+                  },
+                  "startedAt": {
+                    "type": "string",
+                    "description": "ISO 8601"
+                  },
+                  "updatedAt": {
+                    "type": "string",
+                    "description": "When the pass last made progress, ISO 8601"
+                  },
+                  "finishedAt": {
+                    "description": "When it finished, or null while running",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "progress": {
+                    "type": "object",
+                    "properties": {
+                      "projects": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991,
+                        "description": "Projects the pass covers"
+                      },
+                      "projectsDone": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "project": {
+                        "description": "The project being collected now, or null",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "phase": {
+                        "description": "What the pass is doing in that project: `layers` (deleting superseded layers), `scan` (reading the layers that stay), `blobs` (deleting files only deleted layers used)",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "candidates": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991,
+                        "description": "Layers the policy deletes, in the projects reached so far"
+                      },
+                      "layersExamined": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "deletedLayers": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "deletedBlobs": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "candidateBlobs": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "candidateBytes": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "deletedBytes": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "projects",
+                      "projectsDone",
+                      "project",
+                      "phase",
+                      "candidates",
+                      "layersExamined",
+                      "deletedLayers",
+                      "deletedBlobs",
+                      "candidateBlobs",
+                      "candidateBytes",
+                      "deletedBytes"
+                    ],
+                    "additionalProperties": {}
+                  },
+                  "runs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "project": {
+                          "type": "string"
+                        },
+                        "dryRun": {
+                          "type": "boolean"
+                        },
+                        "at": {
+                          "type": "string",
+                          "description": "When the pass finished, ISO 8601"
+                        },
+                        "candidates": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991,
+                          "description": "Layers the policy would delete"
+                        },
+                        "deletedLayers": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "deletedBlobs": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "keptLayers": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "error": {
+                          "description": "Why the pass stopped early, when it did",
+                          "type": "string"
+                        },
+                        "candidateBlobs": {
+                          "description": "Captured-file blobs only the deleted layers used: what a real pass deletes (and did delete, unless a layer could not be read). The same in a dry run. Absent from a server that predates it",
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "candidateBytes": {
+                          "description": "Bytes of those blobs and of the deleted layers' manifests: what a real pass frees. The same in a dry run",
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "deletedBytes": {
+                          "description": "Bytes a real pass removed; 0 for a dry run",
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "project",
+                        "dryRun",
+                        "at",
+                        "candidates",
+                        "deletedLayers",
+                        "deletedBlobs",
+                        "keptLayers"
+                      ],
+                      "additionalProperties": {}
+                    },
+                    "description": "One per project finished so far"
+                  },
+                  "error": {
+                    "description": "Why the pass failed, when it did",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "status",
+                  "dryRun",
+                  "startedAt",
+                  "updatedAt",
+                  "finishedAt",
+                  "progress",
+                  "runs"
+                ],
+                "additionalProperties": {}
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -14223,6 +14550,117 @@
       "GcRunResult": {
         "type": "object",
         "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]{8,64}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "done",
+              "failed"
+            ],
+            "description": "`running` until every project is collected; a pass that stops midway is continued by the next request, scheduled pass or step, never started over"
+          },
+          "dryRun": {
+            "type": "boolean"
+          },
+          "startedAt": {
+            "type": "string",
+            "description": "ISO 8601"
+          },
+          "updatedAt": {
+            "type": "string",
+            "description": "When the pass last made progress, ISO 8601"
+          },
+          "finishedAt": {
+            "description": "When it finished, or null while running",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "progress": {
+            "type": "object",
+            "properties": {
+              "projects": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Projects the pass covers"
+              },
+              "projectsDone": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "project": {
+                "description": "The project being collected now, or null",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "phase": {
+                "description": "What the pass is doing in that project: `layers` (deleting superseded layers), `scan` (reading the layers that stay), `blobs` (deleting files only deleted layers used)",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "candidates": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Layers the policy deletes, in the projects reached so far"
+              },
+              "layersExamined": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "deletedLayers": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "deletedBlobs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "candidateBlobs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "candidateBytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "deletedBytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "projects",
+              "projectsDone",
+              "project",
+              "phase",
+              "candidates",
+              "layersExamined",
+              "deletedLayers",
+              "deletedBlobs",
+              "candidateBlobs",
+              "candidateBytes",
+              "deletedBytes"
+            ],
+            "additionalProperties": {}
+          },
           "runs": {
             "type": "array",
             "items": {
@@ -14262,6 +14700,24 @@
                 "error": {
                   "description": "Why the pass stopped early, when it did",
                   "type": "string"
+                },
+                "candidateBlobs": {
+                  "description": "Captured-file blobs only the deleted layers used: what a real pass deletes (and did delete, unless a layer could not be read). The same in a dry run. Absent from a server that predates it",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "candidateBytes": {
+                  "description": "Bytes of those blobs and of the deleted layers' manifests: what a real pass frees. The same in a dry run",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "deletedBytes": {
+                  "description": "Bytes a real pass removed; 0 for a dry run",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
                 }
               },
               "required": [
@@ -14275,6 +14731,10 @@
               ],
               "additionalProperties": {}
             }
+          },
+          "error": {
+            "description": "Why the pass failed, when it did",
+            "type": "string"
           },
           "policy": {
             "anyOf": [

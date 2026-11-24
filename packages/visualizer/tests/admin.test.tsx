@@ -197,3 +197,25 @@ test('settings actions and fields are reachable through the keyboard command pal
     expect(document.querySelector('[aria-label="Settings actions"]')).toBeNull();
   } finally { await act(async () => setFinderOpen(false)); }
 });
+test('a pass that outlives the request shows its progress, is polled until it is done, and reports blobs and bytes', async () => {
+  const calls: Call[] = [];
+  const running = { id: 'pass-0001', status: 'running', dryRun: false, progress: { projects: 2, projectsDone: 1, project: 'web', phase: 'scan', candidates: 9, layersExamined: 9, deletedLayers: 9 }, runs: [] };
+  const done = { ...running, status: 'done', progress: { ...running.progress, projectsDone: 2, project: null, phase: null }, runs: [{ project: 'default', dryRun: false, at: '2026-11-01T00:00:00Z', candidates: 9, deletedLayers: 9, deletedBlobs: 4, keptLayers: 2, candidateBlobs: 4, candidateBytes: 2_500_000, deletedBytes: 2_500_000 }] };
+  globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
+    calls.push({ url, init });
+    if (url === '/api/settings/gc/run') return Response.json({ ...running, policy }, { status: 202, headers: { location: '/api/settings/gc/runs/pass-0001' } });
+    if (url === '/api/settings/gc/runs/pass-0001') return Response.json({ ...done, policy });
+    if (url === '/api/settings/gc') return Response.json({ revision, policy, saved: true, lastRuns: [], stateKey: 'server/state.json', currentPass: null });
+    return Response.json({ revision, settings: {}, active: {}, restartRequired: false });
+  }) as typeof fetch;
+  await open();
+  await type('token', 'admin-secret');
+  await click('load');
+  await click('gc-run');
+  expect(document.getElementById('gc-progress')!.textContent).toContain('Collecting: 1 of 2 projects done; web, reading the layers that stay');
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 1_200)); });
+  expect(calls.at(-1)!.url).toBe('/api/settings/gc/runs/pass-0001');
+  expect(document.getElementById('gc-progress')).toBeNull();
+  expect(document.getElementById('gc-runs')!.textContent).toContain('2.5 MB');
+  expect(document.getElementById('gc-runs')!.textContent).toContain('Last collection pass per project');
+});

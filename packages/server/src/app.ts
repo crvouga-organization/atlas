@@ -50,7 +50,7 @@ import { LiveRuns, LiveRunError } from './live-runs';
 import { ConfigError } from './config';
 import { renderSettingsPage, type GcSettings, type ServerSettings } from './settings';
 import { collectGarbage, planGarbage } from '../../reports/src/garbage';
-import type { GcPolicy, GcRun } from '../../schema/src/user-state';
+import type { GcPass, GcPolicy, GcRun } from '../../schema/src/user-state';
 import { Refusal } from './validate';
 import { createAuth, type Auth } from './auth';
 import type { TrustedPublishers } from './trusted-publishing';
@@ -125,6 +125,13 @@ export type AtlasServerOptions = {
   readonly gc?: GcSettings;
   /** How often (ms) the server checks whether a garbage collection pass is due. Default 60 000; for tests. */
   readonly gcCheckMs?: number;
+  /**
+   * For a host that ends long requests (serverless): advance a garbage collection pass for at most this many milliseconds
+   * per request, and carry it on with the next request, poll or scheduled pass. Unset: a pass runs to the end in the background.
+   */
+  readonly gcBudgetMs?: number;
+  /** How long `POST /api/settings/gc/run` waits for a pass to finish before answering `202` with the pass to poll. Default 2000 ms. */
+  readonly gcWaitMs?: number;
   /** Extra runtime configuration written into the page. */
   readonly page?: Record<string, unknown>;
 };
@@ -144,12 +151,15 @@ export type AtlasServer = {
    * counts. Never throws: a failure is the `error` of the returned run.
    */
   collectGarbage(policy: GcPolicy, options: { readonly dryRun: boolean; readonly project: string }): Promise<GcRun>;
+  /** This project's upload store and the layers its report has read that no longer decide any result, after one more look at the store: what a garbage collection pass works from. */
+  garbageSource(): Promise<{ readonly store: ObjectStore; readonly eligible: ReadonlySet<string> }>;
   /**
    * What timers do on a long-running server, done once, for a scheduler to call where nothing runs between requests: look
-   * at the store, expire silent live runs, and run garbage collection when a saved, enabled policy is due (the time of the
-   * last pass is kept in the store). Present on the server `createAtlasServer` returns.
+   * at the store, expire silent live runs, and carry on a garbage collection pass, or start one when a saved, enabled
+   * policy is due (the time of the last pass is kept in the store). A pass is advanced within `gcBudgetMs`, so this never
+   * outlives a function's maximum duration. Present on the server `createAtlasServer` returns.
    */
-  maintain?(): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string }>;
+  maintain?(): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string; readonly pass?: GcPass | null }>;
   /** Stop refreshing and end every live connection. */
   close(): void;
 };
@@ -903,7 +913,8 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
       // Look at the store once more first, so "superseded" is judged on everything uploaded so far.
       await index.refreshNow();
       const plan = await planGarbage(writeBackend!.store, { policy, nowMs: now(), eligible: index.superseded() });
-      const outcome = run.dryRun ? { deletedLayers: 0, deletedBlobs: 0 } : await collectGarbage(writeBackend!.store, plan);
+      // A dry run walks the same steps without deleting, so it says what a real pass would free: layers, blobs and bytes.
+      const outcome = await collectGarbage(writeBackend!.store, plan, { dryRun: run.dryRun });
       if (outcome.deletedLayers) options.log?.({ at: new Date(now()).toISOString(), level: 'info', gc: run.project, deletedLayers: outcome.deletedLayers, deletedBlobs: outcome.deletedBlobs });
       return { ...base, at: new Date(now()).toISOString(), candidates: plan.candidates.length, ...outcome, keptLayers: plan.kept };
     } catch (error) {
@@ -923,6 +934,11 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
     index,
     events,
     collectGarbage: collect,
+    async garbageSource() {
+      // Look at the store once more first, so "superseded" is judged on everything uploaded so far.
+      await index.refreshNow();
+      return { store: writeBackend!.store, eligible: new Set(index.superseded()) };
+    },
     ready: index.start(options.refreshMs ?? 10_000),
     close: () => { clearInterval(leaseTimer); stopListening(); index.stop(); events.close(); }
   };

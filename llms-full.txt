@@ -2672,6 +2672,29 @@ same-origin in browsers) read and save the policy; `POST /api/settings/gc/run` a
 revision is the SHA-256 of the stored document, so saving the policy and saving settings invalidate each other's
 revision: reload, then save. An object store has no conditional writes, so run one server per bucket.
 
+**Passes.** Applying a policy to tens of thousands of layers takes longer than a proxy or a serverless function lets a
+request last, so it runs as a **pass** kept in the store (`server/gc/runs/<id>.json`) rather than inside the request:
+
+- `POST /api/settings/gc/run` starts a pass and answers with it: `200` with every project's run once it is done (a
+  small pass is done before the answer, so the answer is what it always was), or `202 Accepted` with
+  `Location: /api/settings/gc/runs/{id}` while it continues in the background. `?wait=1` waits for the end, as before.
+  `/admin` shows the pass's progress and polls it.
+- There is **one pass at a time**: asking again while one runs answers that one, not a second pass.
+  `GET /api/settings/gc` says which pass is running (`currentPass`), and `GET /api/settings/gc/runs/{id}` how far it has
+  come: the project, its phase (`layers`, `scan`, `blobs`), layers examined and deleted, blobs, bytes.
+- A pass works in **batches** and writes what each batch found to the store before it deletes anything. A pass that is
+  stopped (a restart, a crash, a request that ran out of time) is **carried on** by the next request about it, the
+  schedule or `/api/cron`, from where it was, never started over, and the batches together delete exactly what one
+  uninterrupted pass would. The time ages are judged against is fixed when the pass starts. Two servers could reach for
+  the same pass: a lease in its record keeps them apart, and what is already written makes a repeat harmless.
+- On a host that bounds requests (the [serverless handler](deploying.md#vercel)), each request or scheduled run carries
+  the pass on for at most `ATLAS_GC_BUDGET_SECONDS` (120) and stops; polling the pass, asking to run it again, or the next
+  scheduled run continues it. Elsewhere a pass runs to the end in the background.
+- **A dry run reports what a real pass would free**: per project `candidates` (layers), `candidateBlobs` (captured
+  files only those layers used) and `candidateBytes` (the bytes of those files and of the layers' manifests). A real
+  pass reports the same, plus `deletedLayers`, `deletedBlobs` and `deletedBytes`. Bytes are read from each object's
+  size, without reading the object.
+
 ## Configuration
 
 Everything but the [S3 storage](#required-s3-storage) has a default. Settings come from the settings saved in S3 (the lowest layer), then
@@ -3062,6 +3085,7 @@ curl "$ATLAS_SERVER_URL/api/projects/$ATLAS_PROJECT/reports/tests?format=markdow
 | `GET /api/settings/gc` | admin | Read the garbage collection policy. |
 | `PUT /api/settings/gc` | admin | Save the garbage collection policy. |
 | `POST /api/settings/gc/run` | admin | Collect garbage now, or preview it. |
+| `GET /api/settings/gc/runs/{id}` | admin | How far a garbage collection pass has come. |
 | `GET /healthz` | none | Is the process up. |
 | `GET /readyz` | none | Has the server read its backends. |
 | `GET /api/openapi.json` | none | This document. |
@@ -7391,11 +7415,26 @@ Responses: `200` The saved policy and the new revision.; `401` No token, or an u
 
 `POST /api/settings/gc/run` · role: admin
 
-Applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what it would delete (a disabled policy is previewed as if enabled). Answers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.
+Starts a pass that applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what a real pass would delete: layers, blobs (`candidateBlobs`) and bytes (`candidateBytes`). A disabled policy is previewed as if enabled.
+
+The pass runs in the background and is kept in the store. The answer is the pass: `200` with every run once it is done (a small pass is done before the answer), `202` with `Location: /api/settings/gc/runs/{id}` to poll while it runs. `wait=1` waits for the end, as this operation did before passes existed. There is only one pass at a time: asking again while one runs answers that one. On a host that bounds requests (serverless), each request carries the pass on for a limited time and the next request, poll or scheduled pass continues it.
+
+Answers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.
 
 - `dryRun` (query): `1` or `true` to only count what would be deleted.
+- `wait` (query): `1` or `true` to answer only when the pass is done.
 
-Responses: `200` One run per project.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `409` No policy has been saved, or it is disabled.
+Responses: `200` The finished pass, with one run per project.; `202` The pass, still running: poll its `Location`.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `409` No policy has been saved, or it is disabled.
+
+### How far a garbage collection pass has come
+
+`GET /api/settings/gc/runs/{id}` · role: admin
+
+A pass by its id: `running`, `done` or `failed`, its progress (projects, the phase of the current one, layers examined and deleted, blobs, bytes) and the runs of the projects finished so far. `200` once it is done, `202` while it runs. A running pass that no process is carrying on (its step ran out of time, or its server restarted) is carried on by this request: in the background on a long-running server, for a bounded time on a serverless host. Finished passes are kept for a while, then forgotten (`404`).
+
+- `id` (path, required): The pass id from `POST /api/settings/gc/run`.
+
+Responses: `200` The finished pass.; `202` The pass, still running.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `404` No such pass.
 
 ### Is the process up
 

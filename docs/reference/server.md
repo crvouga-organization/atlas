@@ -81,12 +81,15 @@ export type AtlasServer = {
    * counts. Never throws: a failure is the `error` of the returned run.
    */
   collectGarbage(policy: GcPolicy, options: { readonly dryRun: boolean; readonly project: string }): Promise<GcRun>;
+  /** This project's upload store and the layers its report has read that no longer decide any result, after one more look at the store: what a garbage collection pass works from. */
+  garbageSource(): Promise<{ readonly store: ObjectStore; readonly eligible: ReadonlySet<string> }>;
   /**
    * What timers do on a long-running server, done once, for a scheduler to call where nothing runs between requests: look
-   * at the store, expire silent live runs, and run garbage collection when a saved, enabled policy is due (the time of the
-   * last pass is kept in the store). Present on the server `createAtlasServer` returns.
+   * at the store, expire silent live runs, and carry on a garbage collection pass, or start one when a saved, enabled
+   * policy is due (the time of the last pass is kept in the store). A pass is advanced within `gcBudgetMs`, so this never
+   * outlives a function's maximum duration. Present on the server `createAtlasServer` returns.
    */
-  maintain?(): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string }>;
+  maintain?(): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string; readonly pass?: GcPass | null }>;
   /** Stop refreshing and end every live connection. */
   close(): void;
 };
@@ -428,6 +431,101 @@ The viewers connected to `/api/events` and how to reach them all. One hub per se
 - `publish(name: EventName, data: unknown): void` — Tell every viewer. `data` is JSON.
 - `stream(request: Request, greeting: () => unknown): Response` — A stream for one viewer, starting with `hello` (what `greeting` returns). It ends when the viewer goes.
 - `close(): void` — End every stream, for shutting down.
+
+### Garbage collection passes
+
+Source: `packages/server/src/gc-passes.ts`
+
+A garbage collection pass over every project, kept in the store so that any server instance can report it and carry
+it on. A pass is started once (a second start while one runs returns that one), then advanced: on a long-running server
+to the end in the background; on a serverless host in steps bounded by a time budget, each continued by the next
+request, scheduled pass or poll. Each project's part is applied with `stepGarbage`, whose findings are kept in the store
+too (`server/gc/runs/<id>/<project>/`), so a pass that stops or is killed is finished by the next step, never started
+over, and never deletes more than one unbounded pass would. The time a pass judges ages against is fixed when it starts.
+
+Two instances could try to advance one pass at once: a lease in the pass record keeps them apart (the store has no
+conditional writes, so the lease is written, then read back). What each batch found is written before it acts, so
+even an overlap repeats idempotent work rather than deleting anything that is still used.
+
+See docs/server.md#user-state-and-garbage-collection
+
+#### `GC_PREFIX`
+
+```ts
+export const GC_PREFIX = …
+```
+
+Where passes are kept, beside the other server state.
+
+#### `GC_LAST_RUNS`
+
+```ts
+export const GC_LAST_RUNS = …
+```
+
+The runs of the newest finished real pass, for `GET /api/settings/gc` on any instance.
+
+#### `GcSource`
+
+```ts
+export type GcSource = { readonly store: ObjectStore; readonly eligible: ReadonlySet<string> };
+```
+
+What one project offers a pass: its store, and the layers its report has read that no longer decide any result.
+
+#### `GcPassesOptions`
+
+```ts
+export type GcPassesOptions = {
+  /** Where pass records and their findings are kept: the node's own store. */
+  readonly store: ObjectStore;
+  /** The projects a pass covers, in order. */
+  readonly projects: () => Promise<readonly string[]>;
+  /** A project's store and eligible layers, or null when it cannot be collected now (the reason is recorded). */
+  readonly source: (project: string) => Promise<GcSource | { readonly error: string }>;
+  /** Told of the runs of every finished real pass. */
+  readonly record?: (runs: readonly GcRun[]) => void;
+  /** The clock ages are judged by and times are recorded with. Default `Date.now`. */
+  readonly now?: () => number;
+  /** The clock budgets and leases are measured with: one that moves. Default `Date.now`. */
+  readonly tick?: () => number;
+  readonly log?: (line: Record<string, unknown>) => void;
+};
+```
+
+What `GcPasses` needs from the server.
+
+#### `publicPass`
+
+```ts
+export function publicPass(stored: Stored): GcPass
+```
+
+The public view of a stored pass: what the API answers.
+
+#### `GcPasses`
+
+```ts
+export class GcPasses
+```
+
+Garbage collection passes kept in the store. One instance per server; every method may be called from any instance of a
+deployment, since nothing it relies on is held only in memory.
+
+**Example**
+
+```ts
+const passes = new GcPasses({ store, projects: async () => ['default'], source: async () => ({ store, eligible: index.superseded() }) });
+const pass = await passes.start(policy, { dryRun: false });
+await passes.advance(pass.id, { budgetMs: 60_000 });
+```
+
+- `async get(id: string): Promise<GcPass | null>` — A pass by its id, or null.
+- `async current(): Promise<GcPass | null>` — The pass running now, or null.
+- `async lastRuns(): Promise<readonly GcRun[]>` — The runs of the newest finished real pass, as kept in the store.
+- `async start(policy: GcPolicy, options: { readonly dryRun: boolean }): Promise<GcPass>` — Start a pass under `policy`, or return the one already running (whatever kind it is): there is only ever one. The time the policy's ages are judged against is fixed now, so every step of the pass agrees on what is old enough.
+- `advance(id: string, options: { readonly budgetMs?: number } = {}): Promise<GcPass>` — Carry a running pass on, until it is done or `budgetMs` has passed (default: to the end). Returns the pass as it then stands. Another worker holding the pass's lease makes this return at once, with nothing done.
+- `busy(id: string): boolean` — Is this process advancing that pass right now?
 
 ### HTTP host for a fetch handler
 

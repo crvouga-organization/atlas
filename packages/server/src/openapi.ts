@@ -161,9 +161,26 @@ const BASE_OPERATIONS: readonly Operation[] = [
   },
   {
     route: 'POST /api/settings/gc/run', path: '/api/settings/gc/run', operationId: 'runGarbageCollection', tag: 'Operations', role: 'admin',
-    summary: 'Collect garbage now, or preview it', description: 'Applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what it would delete (a disabled policy is previewed as if enabled). Answers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.',
-    parameters: [{ name: 'dryRun', in: 'query', required: false, description: '`1` or `true` to only count what would be deleted.', schema: str }],
-    responses: { '200': json('One run per project.', 'GcRunResult'), '401': UNAUTHORIZED, '403': FORBIDDEN, '409': problem('No policy has been saved, or it is disabled.') }
+    summary: 'Collect garbage now, or preview it',
+    description: [
+      'Starts a pass that applies the policy saved in S3 to every project now, instead of waiting for the schedule. Only report layers that were read and no longer decide any result, older than the policy allows and beyond its `keepLatest`, are deleted, with the captured files only they used. With `dryRun=1` nothing is deleted and each run reports what a real pass would delete: layers, blobs (`candidateBlobs`) and bytes (`candidateBytes`). A disabled policy is previewed as if enabled.',
+      '',
+      'The pass runs in the background and is kept in the store. The answer is the pass: `200` with every run once it is done (a small pass is done before the answer), `202` with `Location: /api/settings/gc/runs/{id}` to poll while it runs. `wait=1` waits for the end, as this operation did before passes existed. There is only one pass at a time: asking again while one runs answers that one. On a host that bounds requests (serverless), each request carries the pass on for a limited time and the next request, poll or scheduled pass continues it.',
+      '',
+      'Answers 409 when no policy has been saved, and, without `dryRun`, when the saved policy is disabled. Requires an admin Bearer token and a same-origin request in browsers.'
+    ].join('\n'),
+    parameters: [
+      { name: 'dryRun', in: 'query', required: false, description: '`1` or `true` to only count what would be deleted.', schema: str },
+      { name: 'wait', in: 'query', required: false, description: '`1` or `true` to answer only when the pass is done.', schema: str }
+    ],
+    responses: { '200': json('The finished pass, with one run per project.', 'GcRunResult'), '202': json('The pass, still running: poll its `Location`.', 'GcRunResult'), '401': UNAUTHORIZED, '403': FORBIDDEN, '409': problem('No policy has been saved, or it is disabled.') }
+  },
+  {
+    route: 'GET /api/settings/gc/runs/:id', path: '/api/settings/gc/runs/{id}', operationId: 'getGarbageCollectionPass', tag: 'Operations', role: 'admin',
+    summary: 'How far a garbage collection pass has come',
+    description: 'A pass by its id: `running`, `done` or `failed`, its progress (projects, the phase of the current one, layers examined and deleted, blobs, bytes) and the runs of the projects finished so far. `200` once it is done, `202` while it runs. A running pass that no process is carrying on (its step ran out of time, or its server restarted) is carried on by this request: in the background on a long-running server, for a bounded time on a serverless host. Finished passes are kept for a while, then forgotten (`404`).',
+    parameters: [{ name: 'id', in: 'path', required: true, description: 'The pass id from `POST /api/settings/gc/run`.', schema: str }],
+    responses: { '200': json('The finished pass.', 'GcRunResult'), '202': json('The pass, still running.', 'GcRunResult'), '401': UNAUTHORIZED, '403': FORBIDDEN, '404': problem('No such pass.') }
   },
   {
     route: 'GET /healthz', path: '/healthz', operationId: 'getHealth', tag: 'Operations', role: 'none',
@@ -824,7 +841,7 @@ const BASE_OPERATIONS: readonly Operation[] = [
   }
 ];
 
-const NODE_OPERATIONS = new Set(['/api/projects', '/api/settings', '/api/settings/gc', '/api/settings/gc/run', '/api/server', '/api/openapi.json']);
+const NODE_OPERATIONS = new Set(['/api/projects', '/api/settings', '/api/settings/gc', '/api/settings/gc/run', '/api/settings/gc/runs/{id}', '/api/server', '/api/openapi.json']);
 const PROJECT_PARAMETER: Param = { name: 'project', in: 'query', description: 'Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.', schema: { type: 'string', pattern: '^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$', maxLength: 64 }, example: 'todo-app' };
 /** Every node operation and the same stable report protocol inside each project namespace. */
 export const OPERATIONS: readonly Operation[] = BASE_OPERATIONS.flatMap(operation => {

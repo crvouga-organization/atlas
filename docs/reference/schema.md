@@ -3186,10 +3186,36 @@ export type GcSnapshot = z.output<typeof GcSnapshotSchema>;
 
 The garbage collection settings response, see {@link GcSnapshotSchema}.
 
+#### `GcPassProgressSchema`
+
+```ts
+export const GcPassProgressSchema = …
+```
+
+How far a garbage collection pass has come, over every project.
+
+#### `GcPassSchema`
+
+```ts
+export const GcPassSchema = …
+```
+
+One garbage collection pass over every project, kept in the store (`server/gc/runs/<id>.json`) so any server instance
+can report and continue it: `GET /api/settings/gc/runs/{id}`. At most one pass is `running` at a time.
+
+#### `GcPass`
+
+```ts
+export type GcPass = z.output<typeof GcPassSchema>;
+```
+
+A garbage collection pass, see {@link GcPassSchema}.
+
 #### `GcRunResultSchema`
 
 ```ts
 export const GcRunResultSchema = …
 ```
 
-`POST /api/settings/gc/run`: the passes that ran, one per project.
+`POST /api/settings/gc/run`: the passes that ran, one per project. The answer is also the pass itself (`id`, `status`,
+`progress`, …): `200` once it is done (`runs` complete), `202` while it continues in the background (`runs` so far).

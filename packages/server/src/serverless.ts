@@ -53,6 +53,8 @@ export type AtlasHandler = ((request: Request) => Promise<Response>) & { readonl
 const DEFAULT_DIRECT_UPLOAD_OVER = 4 * 1024 * 1024;
 /** Most function hosts end a request after five minutes; streams end before that. */
 const DEFAULT_STREAM_SECONDS = 240;
+/** A garbage collection step stops starting batches after this long, well inside a five-minute request. */
+const DEFAULT_GC_BUDGET_SECONDS = 120;
 /** Where a rewrite that sends every path to one function puts the path the browser asked for. */
 const PATH_PARAM = '__atlas_path';
 
@@ -116,7 +118,9 @@ export function createAtlasHandler(options: AtlasHandlerOptions = {}): AtlasHand
       streamMaxMs: number(env.ATLAS_STREAM_MAX_SECONDS, DEFAULT_STREAM_SECONDS) * 1000,
       directUploadOverBytes: number(env.ATLAS_DIRECT_UPLOAD_OVER_BYTES, DEFAULT_DIRECT_UPLOAD_OVER),
       // Recordings a browser plays come from the store, not through the function (ATLAS_REDIRECT_DOWNLOADS=0 to keep them in).
-      redirectDownloads: env.ATLAS_REDIRECT_DOWNLOADS !== '0' && env.ATLAS_REDIRECT_DOWNLOADS !== 'false'
+      redirectDownloads: env.ATLAS_REDIRECT_DOWNLOADS !== '0' && env.ATLAS_REDIRECT_DOWNLOADS !== 'false',
+      // A garbage collection pass is carried on in steps that fit in one request; the next request, poll or cron run continues it.
+      gcBudgetMs: number(env.ATLAS_GC_BUDGET_SECONDS, DEFAULT_GC_BUDGET_SECONDS) * 1000
     });
     await server.ready;
     return { server, config };
