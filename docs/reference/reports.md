@@ -1833,8 +1833,8 @@ Source: `packages/reports/src/doctor.ts`. Import: `@crvouga/atlas/reports/doctor
 
 `inspectStore` checks that a store works end to end (credentials, listing, what it holds, writing and reading back a
 scratch object) and says what to fix when it does not; `iamPolicy` prints the least-privilege AWS policy for publishers
-and readers. Used by `atlas report doctor` and `atlas report policy`, for folders, S3-compatible buckets and Atlas
-servers alike.
+and readers. Used by `atlas report doctor` and `atlas report policy`, for folders, S3-compatible buckets, Vercel Blob
+stores and Atlas servers alike. For a server it first says whether Atlas was reached at all, past a platform's sign-in.
 
 See docs/deploying.md
 
@@ -3837,7 +3837,8 @@ Source: `packages/reports/src/http-store.ts`. Import: `@crvouga/atlas/reports/ht
 `httpStore` speaks the server's store protocol (`/api/store`) as an `ObjectStore`, so everything that publishes to a store
 (`publishChecks`, spec sets, run uploads, `copyStore`, `createReporter`) publishes to a server unchanged. It retries what a
 retry can fix (network errors, 5xx, 429, 408) with jittered backoff, never what it cannot (401, 403, 409, 413, 422), and
-every refusal says what to do about it.
+every refusal says what to do about it. Behind a platform's sign-in it sends the extra headers of `ATLAS_HEADERS`, and a
+sign-in page where Atlas should have answered is an error that says so, never a parse failure.
 
 See docs/server.md#the-store-protocol
 
@@ -3851,6 +3852,12 @@ export type HttpStoreOptions = {
   readonly url: string;
   /** A publish or admin token to write with, a read token to read with. Never put it in the URL. */
   readonly token?: string;
+  /**
+   * Extra headers for every request, for a server behind a platform's sign-in (`x-vercel-protection-bypass`, Cloudflare
+   * Access service tokens). Default: `ATLAS_HEADERS` from the process environment (throws when it is malformed). Their
+   * values are never printed.
+   */
+  readonly headers?: Readonly<Record<string, string>>;
   readonly fetch?: typeof fetch;
   /** Retries after the first attempt, for network errors and server errors. Default 4. */
   readonly retries?: number;
@@ -3879,6 +3886,8 @@ export type HttpStore = ObjectStore & PagedListing & {
   /** `https://atlas.example.com`, with no secrets. */
   readonly label: string;
   readonly url: string;
+  /** The names (never the values) of the extra headers sent with every request. */
+  readonly headerNames: readonly string[];
   /** Is the server there, and does it know this token? */
   ping(): Promise<{ readonly ok: boolean; readonly ms: number; readonly role?: string; readonly error?: string }>;
   /** The gate, worked out by the server from the layers it holds: the `atlas report status --format json` document. Needs a token that may read. */
@@ -8258,6 +8267,77 @@ Lists the source records of a commit from the shared and the local store, one pe
 replaces the shared one of the same name only; others from both are kept. A store that fails is skipped, and the
 error is thrown only when no source was found at all and a store failed.
 
+### Extra headers for an Atlas server behind a sign-in
+
+Source: `packages/reports/src/request-headers.ts`. Import: `@crvouga/atlas/reports/request-headers`
+
+A server hosted behind a platform's sign-in (Vercel Deployment Protection, Cloudflare Access, an identity-aware proxy)
+only lets a machine through with that platform's own header, beside Atlas's token. `ATLAS_HEADERS` names those
+headers once (`name=value`, separated by commas or new lines) and every client that talks to an Atlas server sends
+them. Their values are secrets: nothing here ever prints one, not even when an entry is malformed.
+
+See docs/deploying.md#a-server-behind-a-sign-in
+
+#### `parseHeaders`
+
+```ts
+export function parseHeaders(text: string): Readonly<Record<string, string>>
+```
+
+Parses an `ATLAS_HEADERS` value: `name=value` entries separated by commas or new lines; spaces around each are
+ignored, and a value may itself contain `=`. Names are lower-cased.
+
+Throws an error that names the entry by its position (and its name, when it has one), never its value, when an
+entry has no `=`, an empty name or value, a name that is not a valid header name, a name Atlas sets itself
+(`authorization`, `content-type`, `content-length`, `host`, `x-atlas-project`), or a name given twice.
+
+**Example**
+
+```ts
+parseHeaders('x-vercel-protection-bypass=abc123'); // { 'x-vercel-protection-bypass': 'abc123' }
+```
+
+#### `atlasHeaders`
+
+```ts
+export function atlasHeaders(env: Env): Readonly<Record<string, string>>
+```
+
+The extra headers to send to an Atlas server, from `ATLAS_HEADERS` in `env`; empty when it is not set. Throws as
+{@link parseHeaders} does for a malformed value, so a command fails before it sends anything.
+
+**Example**
+
+```ts
+const headers = atlasHeaders(process.env);
+```
+
+#### `processHeaders`
+
+```ts
+export function processHeaders(): Readonly<Record<string, string>>
+```
+
+`ATLAS_HEADERS` from the process environment, where there is one (not in a browser).
+
+#### `isSignInPage`
+
+```ts
+export function isSignInPage(response: Response, requested: string, expectJson: boolean): boolean
+```
+
+Did a request meant for an Atlas server get a platform's sign-in page instead? True when the request was redirected to
+another origin (a sign-in host), or the answer is HTML where Atlas answers JSON (`expectJson`), or a 401 or 403 that is
+HTML (Atlas refuses in JSON). Reads only the status, headers and final URL, never the body.
+
+#### `signInMessage`
+
+```ts
+export function signInMessage(base: string, headers: Readonly<Record<string, string>>): string
+```
+
+What to say when {@link isSignInPage} is true: the host's sign-in stopped the request before Atlas saw it.
+
 ### Resilient report cache
 
 Source: `packages/reports/src/resilient-cache.ts`. Import: `@crvouga/atlas/reports/resilient-cache`
@@ -9880,10 +9960,12 @@ checked here; the store underneath is responsible for it. Returned keys have the
 
 Source: `packages/reports/src/store-url.ts`. Import: `@crvouga/atlas/reports/store-url`
 
-Turns a store name (`./folder`, `s3://bucket/prefix`, `r2://…`, `gs://…`, `https://atlas.example.com`) into an opened
-`ObjectStore`, and a list of names (`ATLAS_STORE`, `--store`) into backends with unique ids. Secrets never travel in a
-URL: S3 credentials come from the environment, an Atlas server's token from `ATLAS_TOKEN` (or `ATLAS_TOKEN_<ID>` for a
-named store when several servers are used), and a token is never sent to a server over plain `http://` beyond this machine.
+Turns a store name (`./folder`, `s3://bucket/prefix`, `r2://…`, `gs://…`, `vercel-blob://folder`, `https://atlas.example.com`)
+into an opened `ObjectStore`, and a list of names (`ATLAS_STORE`, `--store`) into backends with unique ids. Secrets never
+travel in a URL: S3 credentials and the Blob token (`BLOB_READ_WRITE_TOKEN`) come from the environment, an Atlas server's
+token from `ATLAS_TOKEN` (or `ATLAS_TOKEN_<ID>` for a named store when several servers are used), and a token is never sent
+to a server over plain `http://` beyond this machine. Extra headers for a server behind a sign-in (`ATLAS_HEADERS`) come
+from the environment too.
 
 See docs/deploying.md#1-where-results-are-kept
 
@@ -9893,11 +9975,13 @@ See docs/deploying.md#1-where-results-are-kept
 export type StoreLocation =
   | { readonly kind: 'directory'; readonly directory: string }
   | { readonly kind: 's3'; readonly bucket: string; readonly prefix: string; readonly region?: string; readonly endpoint?: string; readonly pathStyle?: boolean }
+  /** A folder of the Vercel Blob store that `BLOB_READ_WRITE_TOKEN` belongs to. */
+  | { readonly kind: 'vercel-blob'; readonly prefix: string }
   /** An Atlas server: uploads go to it, and it shows everyone the combined report. */
   | { readonly kind: 'server'; readonly url: string };
 ```
 
-Where a store is, parsed: a `directory`, an S3-compatible `s3` bucket and prefix (with region, endpoint and addressing), or an Atlas `server` URL.
+Where a store is, parsed: a `directory`, an S3-compatible `s3` bucket and prefix (with region, endpoint and addressing), a folder of a Vercel Blob store, or an Atlas `server` URL.
 
 #### `OpenedStore`
 
@@ -9909,6 +9993,8 @@ export type OpenedStore = {
   readonly location: StoreLocation;
   /** The S3 handle, for credential source and ping. */
   readonly s3?: S3Store;
+  /** The Vercel Blob handle, for ping. */
+  readonly blob?: VercelBlobStore;
   /** The server handle, for ping. */
   readonly server?: HttpStore;
 };
@@ -9930,6 +10016,8 @@ Where a store is, from one string:
   `credentialChain`).
 - `r2://bucket/prefix?account=<id>` (Cloudflare R2) and `gs://bucket/prefix` (Google Cloud Storage with
   HMAC keys): the same store with the endpoint filled in. Atlas does not test against these two.
+- `vercel-blob://folder`: a folder of the Vercel Blob store whose read-write token is `BLOB_READ_WRITE_TOKEN`
+  (`vercel-blob://` alone is the whole store). The token is never in the URL.
 
 #### `StoreRole`
 
@@ -13731,3 +13819,101 @@ called inside a Solid root.
 - `navigation`: where the hash, keys and title live (the browser, or a fake).
 
 - `timers`: timer functions for the hash-write debounce and playback.
+
+### Vercel Blob object store
+
+Source: `packages/reports/src/vercel-blob-store.ts`. Import: `@crvouga/atlas/reports/vercel-blob-store`
+
+An `ObjectStore` on Vercel Blob, written without the `@vercel/blob` SDK: its HTTP API is called with `fetch`, the
+same way the S3 store signs its own requests, so it adds nothing to the install and runs on Bun and Node. Objects
+are private and kept under their exact keys (no random suffix, overwrite allowed, so a retried write lands on the
+same key with the same bytes), and are read back with the store's token. `getUri` never returns a URL that works
+without the token: it answers `null`, and the server streams the bytes instead. Importing the module does no work.
+
+See docs/deploying.md#vercel-blob
+See docs/report-contract.md#backends
+
+#### `VercelBlobStoreOptions`
+
+```ts
+export type VercelBlobStoreOptions = {
+  /** A read-write token of the Blob store (`vercel_blob_rw_<store id>_…`). Default: `BLOB_READ_WRITE_TOKEN`. Never put it in a store URL. */
+  readonly token?: string;
+  /** A folder inside the Blob store that holds everything: `atlas/my-project`. */
+  readonly prefix?: string;
+  /** The Blob API. Default: `VERCEL_BLOB_API_URL`, then `https://vercel.com/api/blob`. Set it for a local emulator. */
+  readonly apiUrl?: string;
+  /** Where private objects are read from, given the store id. Default: `https://<store id>.private.blob.vercel-storage.com`. */
+  readonly contentUrl?: (storeId: string) => string;
+  /** The environment variables to read (`BLOB_READ_WRITE_TOKEN`, `VERCEL_BLOB_API_URL`). Default: `process.env`. */
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  /** The `fetch` to send requests with. Default: the global one; inject a fake in tests. */
+  readonly fetch?: typeof fetch;
+  /** Attempts after the first for a request that failed in a way worth retrying. Default 4. */
+  readonly retries?: number;
+  /** For the service to start answering, per attempt, in milliseconds. Default 30 000. */
+  readonly timeoutMs?: number;
+  /** The wait between retries, in milliseconds. Default: a real timer; inject in tests. */
+  readonly sleep?: (ms: number) => Promise<void>;
+};
+```
+
+How to reach a Blob store. Everything is optional: the token comes from `BLOB_READ_WRITE_TOKEN` by default.
+
+#### `VercelBlobError`
+
+```ts
+export class VercelBlobError extends Error
+```
+
+An error from the Blob store. The message names the store folder and what to do; `status` and `code` are what the
+service answered (`forbidden`, `store_not_found`, `rate_limited`, …), `null` when it was never reached. `retryable`
+says whether trying again can help; the store already retried before throwing.
+
+#### `VercelBlobStore`
+
+```ts
+export type VercelBlobStore = ObjectStore & PagedListing & {
+  /** A description with no secrets: `vercel-blob://my-project/ (store abc123)`. */
+  readonly label: string;
+  /** One cheap round trip: can this store be listed with this token? Used by `atlas report doctor`. */
+  ping(): Promise<{ readonly ok: boolean; readonly ms: number; readonly error?: string }>;
+};
+```
+
+An `ObjectStore` on Vercel Blob with paged listing, a secret-free label, and a cheap reachability check.
+
+#### `blobStoreIdOf`
+
+```ts
+export function blobStoreIdOf(token: string): string | null
+```
+
+The store id inside a read-write token: `vercel_blob_rw_<store id>_<secret>`.
+
+#### `vercelBlobStore`
+
+```ts
+export function vercelBlobStore(options: VercelBlobStoreOptions = {}): VercelBlobStore
+```
+
+An {@link ObjectStore} on Vercel Blob. No SDK: the Blob HTTP API is called with `fetch`, so it runs on Bun and Node and adds
+nothing to the install.
+
+Objects are written private, under the exact key (no random suffix), overwriting what is there, with the content type
+given; they are read back from the store's private host with the token, uncached, so an overwrite is seen at once.
+Throttling, server errors and network failures are retried with jittered backoff.
+
+Behaviour to know: the constructor throws when there is no token, or the token is not a read-write token (the store
+id is read from it). `getUri` always answers `null`: a private object has no URL that works without the token, and a
+permanently public one is never handed out. `listKeys` pages through the whole listing and sorts it. `listPage`
+continues from the service's cursor when it is asked for the page after the one it last returned, and otherwise
+lists the prefix and filters it, so it is always correct and usually one request. `deleteMany` sends 100 keys per request.
+
+**Example**
+
+```ts
+const store = vercelBlobStore({ token: process.env.BLOB_READ_WRITE_TOKEN!, prefix: 'my-project/' });
+await store.put('layers/manifests/x.json', bytes, 'application/json');
+const { ok, error } = await store.ping();
+```

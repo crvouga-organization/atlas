@@ -5,6 +5,7 @@ import path from 'node:path';
 import { createLiveReporter } from '../../reports/src/live-reporter';
 import type { EvidenceCheck } from '../../reports/src/explorer-types';
 import { uniqueChecks } from '../../reports/src/ingest';
+import { processHeaders } from '../../reports/src/request-headers';
 
 /** Reporter options; explicit values override ATLAS_SERVER_URL, ATLAS_PUBLISH_TOKEN, ATLAS_ENVIRONMENT, ATLAS_BRANCH and ATLAS_SHA. */
 export type ReporterOptions = {
@@ -43,7 +44,7 @@ export async function uploadChecks(runner: string, checks: readonly EvidenceChec
   const token = options.token ?? process.env.ATLAS_PUBLISH_TOKEN ?? process.env.ATLAS_TOKEN;
   const response = await fetch(target, {
     method: 'POST', redirect: 'error', signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
-    headers: { 'content-type': 'application/json', ...((options.project ?? process.env.ATLAS_PROJECT) ? { 'x-atlas-project': options.project ?? process.env.ATLAS_PROJECT! } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    headers: { ...processHeaders(), 'content-type': 'application/json', ...((options.project ?? process.env.ATLAS_PROJECT) ? { 'x-atlas-project': options.project ?? process.env.ATLAS_PROJECT! } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify({ producer: options.producer ?? runner, recordedAtMs: options.recordedAtMs ?? Date.now(),
       environment: options.environment ?? process.env.ATLAS_ENVIRONMENT,
       branch: options.branch ?? process.env.ATLAS_BRANCH, sha: options.sha ?? process.env.ATLAS_SHA,

@@ -53,6 +53,7 @@ server. A store is named by a URL. Keys never go in it.
 | Cloudflare R2 | `r2://bucket/atlas/my-project?account=<account id>` (or `R2_ACCOUNT_ID`), with the R2 token's keys in `ATLAS_S3_ACCESS_KEY_ID` / `ATLAS_S3_SECRET_ACCESS_KEY` |
 | Google Cloud Storage | `gs://bucket/atlas/my-project`, with an HMAC key pair in `ATLAS_S3_*` |
 | MinIO, Backblaze B2, Wasabi, SeaweedFS, any S3-compatible | `s3://bucket/atlas/my-project?endpoint=https://host&region=auto` |
+| Vercel Blob (private store) | `vercel-blob://atlas/my-project`, with the store's read-write token in `BLOB_READ_WRITE_TOKEN` ([below](#vercel-blob)) |
 
 Atlas talks to S3 itself, signing requests with Signature Version 4 and sending them with `fetch`: no
 SDK, no extra install, the same on Bun and Node. It is tested against AWS's published signing vectors
@@ -80,6 +81,36 @@ so run `atlas report doctor` against yours before relying on it.
    grows, expire `layers/runs/` (screenshots and clips) first.
 
 Versioning and replication are optional: nothing is ever overwritten with different bytes.
+
+### Vercel Blob
+
+A private [Vercel Blob](https://vercel.com/docs/vercel-blob) store holds layers like a bucket does. Name a folder of it
+and give the store's read-write token in the environment, never in the URL:
+
+```sh
+export BLOB_READ_WRITE_TOKEN=…                        # the Blob store's settings show it
+export ATLAS_STORE=vercel-blob://atlas/my-project      # a folder of the store; vercel-blob:// alone is all of it
+atlas report doctor
+atlas report publish --producer unit --junit out.xml
+```
+
+In code, `vercelBlobStore` from `@crvouga/atlas/reports/vercel-blob-store` is the same store:
+`vercelBlobStore({ token: process.env.BLOB_READ_WRITE_TOKEN, prefix: 'atlas/my-project' })`.
+
+Atlas calls the Blob HTTP API with `fetch`, without the `@vercel/blob` SDK, the same way it talks to S3. Objects are
+written **private**, under their exact keys (no random suffix, overwriting the same bytes on a retry), and read back
+with the token, past the CDN cache, so an overwrite is seen at once. Atlas never hands out a URL to a Blob object:
+`getUri` answers `null`. The store must be private; a public store refuses Atlas's writes.
+
+To move an existing deployment's layers into Blob, merge them: the report read from Blob is then the same.
+
+```sh
+atlas report merge --store s3://my-bucket/atlas/my-project --into vercel-blob://atlas/my-project
+```
+
+The Atlas server (`atlas serve`) still keeps its state in S3 only; running the server itself on Vercel is tracked in
+[issue #117](https://github.com/crvouga/atlas/issues/117). `bun test vercel-blob-store.integration` runs the store
+against a real Blob store when `ATLAS_TEST_BLOB_TOKEN` names one.
 
 ## 2. Check it
 
@@ -126,6 +157,27 @@ verdict, so only the verdict travels: `atlas report status --branch main --ignor
 [`examples/deploy/github-actions.yml`](https://github.com/crvouga/atlas/blob/main/examples/deploy/github-actions.yml)
 is the whole workflow, publishers and gate. The rest of this section is publishing straight to a bucket, for
 CI that has bucket access and no route to the server.
+
+### A server behind a sign-in
+
+When the server is hosted behind a platform's sign-in (Vercel Deployment Protection, Cloudflare Access, an
+identity-aware proxy), people pass it in their browser, but CI and laptops need the platform's own header as well
+as Atlas's token. Name it once in `ATLAS_HEADERS` and every command and reporter that talks to an Atlas server sends it:
+
+```sh
+export ATLAS_STORE=https://atlas.example.com
+export ATLAS_TOKEN=…                                         # the Atlas publish token, unchanged
+export ATLAS_HEADERS='x-vercel-protection-bypass=…'          # the platform's bypass secret
+# several, separated by commas: ATLAS_HEADERS='cf-access-client-id=…,cf-access-client-secret=…'
+atlas report doctor --role publisher
+```
+
+`ATLAS_HEADERS` is `name=value` entries separated by commas or new lines. Values are never printed: a malformed entry
+stops the command with exit 2 and names the entry by its position, and `atlas report doctor` names the headers it sent
+and says whether Atlas was reached past the sign-in. When the platform answers with its sign-in page instead of
+Atlas, the command says *the host asked for sign-in before Atlas was reached: set ATLAS_HEADERS*, rather than failing to
+read the page as JSON. `ATLAS_HEADERS` may not set `authorization` (that is `ATLAS_TOKEN`), and the platform's sign-in
+is never a reason to drop Atlas's tokens: anyone who passes it would otherwise be an admin.
 
 ### Straight to the bucket
 
@@ -443,6 +495,8 @@ leave a source out (which needs the history).
 | `the signature was rejected` | Wrong secret, or wrong region/endpoint for these keys, or the clock is off by more than 15 minutes. |
 | `the bucket does not exist` | Typo, another account, or the store needs `?endpoint=…` (R2, MinIO). |
 | `cannot reach <host>` | Network, DNS or endpoint. Requests are retried with backoff first. |
+| `the host asked for sign-in before Atlas was reached` | The server is behind a platform's sign-in. Set `ATLAS_HEADERS` to its bypass header ([above](#a-server-behind-a-sign-in)); if it is set, its value is wrong. |
+| `vercel-blob://…: access denied` | `BLOB_READ_WRITE_TOKEN` is not a read-write token of that Blob store. Copy it again from the store's settings. |
 | The server says `listening … no backend can be read yet` | The bucket is unreachable from the server. It retries; `/readyz` stays 503 until it can read. |
 | A new layer does not show | Uploaded through the server it is there at once: check the token (`401`/`403` say so). Written straight to a bucket, wait one refresh interval (10 s). Check `atlas report status --store <url>` sees it. |
 | Everything is red because of one laptop | By design the newest result wins. Gate on `--ignore-modified` and a branch ([above](#5-choosing-what-takes-part)). |

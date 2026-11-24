@@ -5,6 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod/v4';
 import type { LiveCheck, LiveRunStartSchema } from '../../schema/src/live-run';
+import { processHeaders } from './request-headers';
 
 /** Fixed identity of a live invocation; a UUID is generated when omitted. */
 export type LiveIdentity = Omit<z.input<typeof LiveRunStartSchema>, 'id'> & { id?: string };
@@ -26,6 +27,7 @@ export function createLiveReporter(identity: LiveIdentity, options: LiveReporter
   const base = new URL(options.url);
   if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash) throw new Error('Atlas live reporter needs an HTTP(S) server URL without credentials, query or fragment.');
   const id = identity.id ?? randomUUID();
+  const extraHeaders = processHeaders();
   const endpoint = `${base.href.replace(/\/$/, '')}/api/live/${id}`;
   let sequence = 0;
   let finishedAtMs: number | undefined;
@@ -41,7 +43,7 @@ export function createLiveReporter(identity: LiveIdentity, options: LiveReporter
     for (let attempt = 0; ; attempt++) {
       try {
         const response = await fetch(endpoint + suffix, { method, redirect: 'error', signal: AbortSignal.timeout(options.timeoutMs ?? 10_000),
-          headers: { 'content-type': 'application/json', ...(options.project ? { 'x-atlas-project': options.project } : {}), ...(options.token ? { authorization: `Bearer ${options.token}` } : {}) }, body: text });
+          headers: { ...extraHeaders, 'content-type': 'application/json', ...(options.project ? { 'x-atlas-project': options.project } : {}), ...(options.token ? { authorization: `Bearer ${options.token}` } : {}) }, body: text });
         const status = response.status;
         const json = response.headers.get('content-type')?.includes('application/json');
         if (response.ok && !json) { await response.body?.cancel(); throw Object.assign(new Error('Atlas live reporter: the endpoint is not an Atlas server. Start or restart the Atlas server.'), { permanent: true }); }

@@ -3,8 +3,8 @@
  *
  * `inspectStore` checks that a store works end to end (credentials, listing, what it holds, writing and reading back a
  * scratch object) and says what to fix when it does not; `iamPolicy` prints the least-privilege AWS policy for publishers
- * and readers. Used by `atlas report doctor` and `atlas report policy`, for folders, S3-compatible buckets and Atlas
- * servers alike.
+ * and readers. Used by `atlas report doctor` and `atlas report policy`, for folders, S3-compatible buckets, Vercel Blob
+ * stores and Atlas servers alike. For a server it first says whether Atlas was reached at all, past a platform's sign-in.
  *
  * @see docs/deploying.md
  */
@@ -56,7 +56,24 @@ export async function inspectStore(backend: CliBackend, options: { readonly role
   const add = (check: Check) => { checks.push(check); return check.ok; };
   const store = backend.store;
   const s3 = backend.s3;
-  add({ ok: true, name: 'store', detail: s3?.label ?? backend.label ?? backend.id });
+  add({ ok: true, name: 'store', detail: s3?.label ?? backend.blob?.label ?? backend.label ?? backend.id });
+
+  if (backend.server) {
+    // A platform's sign-in in front of the server stops everything else: say so before anything else fails.
+    const names = backend.server.headerNames;
+    const ping = await backend.server.ping();
+    add(ping.ok
+      ? { ok: true, name: 'server', detail: `reached Atlas in ${ping.ms} ms${ping.role ? ` as ${ping.role}` : ''}${names.length ? `, past the host's sign-in with ATLAS_HEADERS (${names.join(', ')})` : ''}` }
+      : { ok: false, name: 'server', detail: ping.error ?? 'failed', fix: 'Check the server URL, ATLAS_TOKEN, and, for a server behind a sign-in, ATLAS_HEADERS.' });
+    if (!ping.ok) return checks;
+  }
+  if (backend.blob && role !== 'publisher') {
+    const ping = await backend.blob.ping();
+    add(ping.ok
+      ? { ok: true, name: 'list', detail: `${ping.ms} ms` }
+      : { ok: false, name: 'list', detail: ping.error ?? 'failed', fix: 'Set BLOB_READ_WRITE_TOKEN to a read-write token of the Blob store (its settings show it).' });
+    if (!ping.ok) return checks;
+  }
 
   if (s3 && role !== 'publisher') {
     const ping = await s3.ping();
