@@ -18,7 +18,7 @@ import { brotliCompress, constants as zlibConstants, gzip } from 'node:zlib';
 
 import { Hono, type Context } from 'hono';
 
-import { UNTRUSTED_HEADERS } from '../../reports/src/attachment-response';
+import { storeRedirect, UNTRUSTED_HEADERS } from '../../reports/src/attachment-response';
 import { combineBackends, summarize, type BackendInput, type CombinedReport } from '../../reports/src/compose';
 import { combineEvidence } from '../../reports/src/layer-merge';
 import type { LayerHeader } from '../../reports/src/evidence-types';
@@ -31,7 +31,7 @@ import { readArtifactTagEntries, recordArtifactTags, ArtifactTagError } from '..
 import { publishChecks } from '../../reports/src/publish-checks';
 import { reportStatus } from '../../reports/src/report-status';
 import { ReportIndex, type IndexChange } from '../../reports/src/report-index';
-import { listRunSummaries, readRunFile } from '../../reports/src/run-bundle';
+import { listRunSummaries, readRunFile, runFileKey } from '../../reports/src/run-bundle';
 import { latestSpecSet, readSpecBody } from '../../reports/src/spec-set';
 import { catalogHealth, healthMarkdown, parseRootMapping, parseRootMappings, type RootMapping } from '../../reports/src/catalog-health';
 import { parseArtifactFilter } from '../../reports/src/artifact-query';
@@ -100,6 +100,13 @@ export type AtlasServerOptions = {
    * store that can make an upload target (Vercel Blob); ignored otherwise.
    */
   readonly directUploadOverBytes?: number;
+  /**
+   * Send a browser playing or downloading a run's recording (video, audio, a trace zip) straight to the store, with a
+   * `302` to a URL that works for five minutes, when the store can sign one (S3, Vercel Blob). Off: every byte goes
+   * through the server. Worth it where the server is a function billed by the second; a store whose address browsers
+   * cannot reach (a bucket on a private network) must leave it off.
+   */
+  readonly redirectDownloads?: boolean;
   readonly heartbeatMs?: number;
   /** Producer lease timeout; default 30 seconds. */
   readonly runTimeoutMs?: number;
@@ -804,6 +811,12 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
     const id = c.req.param('id');
     let rel: string;
     try { rel = decodeURIComponent(new URL(c.req.url).pathname.slice(`/api/data/runs/${id}/`.length)); } catch { return c.notFound(); }
+    // The reader's role was checked by the middleware before this, so a URL is only ever made for someone who may read.
+    const key = options.redirectDownloads ? runFileKey(id, rel) : null;
+    if (key !== null) for (const store of stores) {
+      const redirect = await storeRedirect(c.req.raw, store, key);
+      if (redirect) return redirect;
+    }
     for (const store of stores) {
       const stored = await readRunFile(store, id, rel).catch(() => null);
       if (stored) return new Response(stored.body, { headers: { 'content-type': stored.contentType, ...UNTRUSTED_HEADERS, 'cache-control': 'public, max-age=31536000, immutable' } });

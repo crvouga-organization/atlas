@@ -15,7 +15,7 @@
 import { XMLParser } from 'fast-xml-parser';
 
 import { credentialChain, staticCredentials, type CredentialProvider } from './aws-credentials';
-import type { ObjectStore, PagedListing, StoredObject } from './object-store';
+import type { ObjectStore, PagedListing, SignedDownloads, StoredObject } from './object-store';
 import { amzDate, presignUrl, sha256Hex, signRequest, uriEncode, type Credentials } from './sigv4';
 import { ObjectStoreWithPrefix } from './store-prefix';
 
@@ -114,7 +114,7 @@ class Gate {
 }
 
 /** An `ObjectStore` on S3 with paged listing, a secret-free label, and diagnostics. */
-export type S3Store = ObjectStore & PagedListing & {
+export type S3Store = ObjectStore & PagedListing & SignedDownloads & {
   /** A description with no secrets: `s3://bucket/prefix (us-east-1)`. */
   readonly label: string;
   /** Where the credentials came from, once a request has been made. */
@@ -136,7 +136,7 @@ export type S3Store = ObjectStore & PagedListing & {
  * Behaviour to know: a missing key reads as `null`/`false` only when S3 answers 404. For an account without
  * `s3:ListBucket`, S3 answers 403 for a missing key, which throws `S3Error` with a hint: the publishing credentials
  * need `s3:GetObject`, `s3:PutObject` and `s3:ListBucket` (`atlas report policy` prints a least-privilege policy).
- * `getUri` returns a presigned URL valid for one hour. `deleteMany` sends one request per key, 16 at a time.
+ * `getUri` returns a presigned URL valid for one hour; `signedUrl` one valid as long as asked, with the stored type and size. `deleteMany` sends one request per key, 16 at a time.
  * `listKeys` pages through the whole listing and sorts it; use `listPage` to read part of a large catalog. Nothing is
  * checked or created at construction: the first request is the first contact.
  *
@@ -274,6 +274,15 @@ export function s3Store(options: S3StoreOptions): S3Store {
     async getUri(key) {
       if (!(await store.head(key))) return null;
       return presignUrl({ url: urlFor(base + key), credentials: await provider(), region, service: 's3', at: now(), expiresSeconds: 3600 });
+    },
+
+    async signedUrl(key, options) {
+      // The stored type and size, as S3 will serve them: what a caller decides on is what the reader gets.
+      const found = await request('HEAD', base + key, { allow404: true });
+      if (!found) return null;
+      const length = found.headers.get('content-length');
+      const url = await presignUrl({ url: urlFor(base + key), credentials: await provider(), region, service: 's3', at: now(), expiresSeconds: Math.max(1, Math.min(options.expiresInSeconds, 604_800)) });
+      return { url, contentType: found.headers.get('content-type') ?? 'application/octet-stream', size: length === null ? null : Number(length) };
     },
 
     async listKeys(listPrefix = '') {

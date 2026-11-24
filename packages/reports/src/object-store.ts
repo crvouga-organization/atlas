@@ -81,3 +81,17 @@ export interface PagedListing {
 export function isPaged(store: ObjectStore): store is ObjectStore & PagedListing {
   return typeof (store as Partial<PagedListing>).listPage === 'function';
 }
+
+/**
+ * Optional, beyond the seven methods: a short-lived URL anyone holding it may read one object from, and the object's stored
+ * media type and size, so a server can send a large download straight from the store instead of through itself. `null`
+ * when the key is missing. A store without it is always read through `get`.
+ */
+export interface SignedDownloads {
+  signedUrl(key: string, options: { readonly expiresInSeconds: number }): Promise<{ readonly url: string; readonly contentType: string; readonly size: number | null } | null>;
+}
+
+/** Whether a store can hand out short-lived download URLs (`SignedDownloads`). */
+export function canSign(store: ObjectStore): store is ObjectStore & SignedDownloads {
+  return typeof (store as Partial<SignedDownloads>).signedUrl === 'function';
+}

@@ -11,13 +11,25 @@ export const BLOB_CONTENT = 'https://teststore.private.blob.vercel-storage.com';
 
 type Stored = { bytes: Uint8Array; contentType: string };
 
-export function fakeVercelBlob(options: { token?: string; /** A public store refuses private writes, as the service does. */ access?: 'private' | 'public' } = {}) {
+export function fakeVercelBlob(options: { token?: string; /** A public store refuses private writes, as the service does. */ access?: 'private' | 'public'; /** The longest delegation `POST /signed-token` grants. Default an hour. */ maxDelegationMs?: number } = {}) {
   const token = options.token ?? BLOB_TOKEN;
   const objects = new Map<string, Stored>();
   const requests: { method: string; url: string; headers: Record<string, string> }[] = [];
   /** Answers the next N requests with 503, to prove retries. */
   let failNext = 0;
   let uploadsWithClientToken = 0;
+  /** Delegations issued by `POST /signed-token`: the client signing token each was issued with. */
+  const delegations = new Map<string, string>();
+  let presignedReads = 0;
+  const b64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const hmac = async (secret: string, data: string) => b64url(new Uint8Array(await crypto.subtle.sign('HMAC', await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']), new TextEncoder().encode(data))));
+  /** The stored bytes, or one `bytes=a-b` range of them. */
+  const serve = (stored: Stored, range: string | undefined) => {
+    const match = /^bytes=(\d+)-(\d*)$/.exec(range ?? '');
+    if (!match) return new Response(stored.bytes.slice(), { headers: { 'content-type': stored.contentType, 'content-length': String(stored.bytes.length) } });
+    const start = Number(match[1]), end = match[2] ? Math.min(Number(match[2]), stored.bytes.length - 1) : stored.bytes.length - 1;
+    return new Response(stored.bytes.slice(start, end + 1), { status: 206, headers: { 'content-type': stored.contentType, 'content-range': `bytes ${start}-${end}/${stored.bytes.length}` } });
+  };
   const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   const error = (status: number, code: string, message = code) => json(status, { error: { code, message } });
 
@@ -27,6 +39,24 @@ export function fakeVercelBlob(options: { token?: string; /** A public store ref
     const headers = Object.fromEntries(new Headers(init.headers).entries());
     requests.push({ method, url: url.toString(), headers });
     if (failNext > 0) { failNext -= 1; return error(503, 'service_unavailable'); }
+    // A presigned read, as @vercel/blob's presignUrl makes one: no token, a delegation and a signature over the pathname.
+    if (url.origin === new URL(BLOB_CONTENT).origin && url.searchParams.has('vercel-blob-signature')) {
+      const pathname = url.pathname.slice(1).split('/').map(decodeURIComponent).join('/');
+      const delegation = url.searchParams.get('vercel-blob-delegation') ?? '';
+      const signing = delegations.get(delegation);
+      const [payloadPart = '', signaturePart] = delegation.split('.');
+      if (!signing || signaturePart !== await hmac(token, payloadPart)) return new Response('Forbidden', { status: 403 });
+      const scope = JSON.parse(atob(payloadPart.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(payloadPart.length / 4) * 4, '='))) as { validUntil: number; operations: string[]; pathname?: string };
+      const until = url.searchParams.get('vercel-blob-valid-until');
+      if (scope.validUntil <= Date.now() || (until !== null && (Number(until) <= Date.now() || Number(until) > scope.validUntil))) return new Response('Expired', { status: 403 });
+      if (!scope.operations.includes('get') || (scope.pathname && scope.pathname !== '*' && scope.pathname !== pathname)) return new Response('Forbidden', { status: 403 });
+      const canonical = ['operation=get', `pathname=${pathname}`, ...(until !== null ? [`vercel-blob-valid-until=${until}`] : [])].sort().join('\n');
+      if (url.searchParams.get('vercel-blob-signature') !== await hmac(signing, canonical)) return new Response('Forbidden', { status: 403 });
+      const stored = objects.get(pathname);
+      if (!stored) return new Response('Not found', { status: 404 });
+      presignedReads += 1;
+      return serve(stored, headers.range);
+    }
     // A client token, as @vercel/blob makes one: allowed one upload, of one pathname, size and type, until it expires.
     let client: { pathname: string; validUntil: number; maximumSizeInBytes?: number; allowedContentTypes?: string[] } | null = null;
     const bearer = headers.authorization?.replace(/^Bearer /, '') ?? '';
@@ -45,7 +75,7 @@ export function fakeVercelBlob(options: { token?: string; /** A public store ref
       const pathname = url.pathname.slice(1).split('/').map(decodeURIComponent).join('/');
       const stored = objects.get(pathname);
       if (!stored) return new Response('Not found', { status: 404 });
-      return new Response(stored.bytes.slice(), { headers: { 'content-type': stored.contentType, 'content-length': String(stored.bytes.length) } });
+      return serve(stored, headers.range);
     }
     if (!url.toString().startsWith(BLOB_API)) return new Response('unknown host', { status: 502 });
     if (headers['x-api-version'] === undefined) return error(400, 'bad_request', 'x-api-version is required');
@@ -64,6 +94,14 @@ export function fakeVercelBlob(options: { token?: string; /** A public store ref
       uploadsWithClientToken += client ? 1 : 0;
       objects.set(pathname, { bytes, contentType: headers['x-content-type'] ?? 'application/octet-stream' });
       return json(200, { url: `${BLOB_CONTENT}/${pathname}`, pathname, contentType: headers['x-content-type'] });
+    }
+    if (method === 'POST' && route === '/signed-token') {
+      const body = JSON.parse(String(init.body)) as { operations?: string[]; validUntil?: number; pathname?: string };
+      const payload = b64url(new TextEncoder().encode(JSON.stringify({ storeId: token.split('_')[3], operations: body.operations ?? ['get'], validUntil: Math.min(body.validUntil ?? Infinity, Date.now() + (options.maxDelegationMs ?? 3_600_000)), ...(body.pathname ? { pathname: body.pathname } : {}) })));
+      const delegationToken = `${payload}.${await hmac(token, payload)}`;
+      const clientSigningToken = `signing-${Math.random().toString(36).slice(2)}`;
+      delegations.set(delegationToken, clientSigningToken);
+      return json(200, { delegationToken, clientSigningToken });
     }
     if (method === 'POST' && route === '/delete') {
       const body = JSON.parse(String(init.body)) as { urls: string[] };
@@ -95,6 +133,10 @@ export function fakeVercelBlob(options: { token?: string; /** A public store ref
     failNext(count: number) { failNext = count; },
     /** How many objects arrived with a client token (straight from a publisher) rather than the store's token. */
     clientUploads: () => uploadsWithClientToken,
+    /** How many reads were made with a presigned URL (no token). */
+    presignedReads: () => presignedReads,
+    /** How many delegations were issued. */
+    delegationsIssued: () => delegations.size,
     /** The options that point a store at this fake (its content host is the default one, so it is not given). */
     options: { token, apiUrl: BLOB_API, sleep: async () => {} }
   };

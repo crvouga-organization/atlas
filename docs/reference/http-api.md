@@ -1798,19 +1798,19 @@ Responses: `200` The index.; `401` No token, or an unknown one. Send `Authorizat
 
 `GET /api/data/runs/{id}/{path}` · role: read
 
-A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable.
+A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable. On a server that sends downloads from the store (the serverless handler does), a browser playing or downloading a recording (`sec-fetch-dest` of `video`, `audio` or `document`, a stored type of video, audio or zip) is answered `302` to a URL of the store that works for five minutes and needs no token; the role is checked first. Every other request gets the bytes.
 
 - `id` (path, required): The run id.
 - `path` (path, required): The path inside the run.
 - `project` (query): Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.
 
-Responses: `200` The file.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `404` No such run or file.
+Responses: `200` The file.; `302` A recording, from the store: follow `Location` (a five-minute URL; send the same `Range`).; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `404` No such run or file.
 
 ### A file of an uploaded run
 
 `GET /api/projects/{project}/data/runs/{id}/{path}` · role: read
 
-A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable.
+A file of an uploaded run: its manifest, timelines, screenshots, clips. Untrusted bytes, served sandboxed; immutable. On a server that sends downloads from the store (the serverless handler does), a browser playing or downloading a recording (`sec-fetch-dest` of `video`, `audio` or `document`, a stored type of video, audio or zip) is answered `302` to a URL of the store that works for five minutes and needs no token; the role is checked first. Every other request gets the bytes.
 
 Scoped to one project. The same project may be selected on the unprefixed API using ?project= or X-Atlas-Project. Unknown projects return 404 on reads and are created by an authenticated upload.
 
@@ -1818,4 +1818,4 @@ Scoped to one project. The same project may be selected on the unprefixed API us
 - `id` (path, required): The run id.
 - `path` (path, required): The path inside the run.
 
-Responses: `200` The file.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `404` No such run or file.
+Responses: `200` The file.; `302` A recording, from the store: follow `Location` (a five-minute URL; send the same `Range`).; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `404` No such run or file.

@@ -103,7 +103,11 @@ contract](docs/report-contract.md#versioning-and-stability) allows.
   vocabularies, nothing that decides a result. To add a kind of evidence, add it to
   `layer-v1-extended.json` and keep `layer-extensibility.test.ts` passing. Never close a vocabulary, never make
   an evidence field required, never let evidence change a status, a slot or a winner.
-- Attachment bytes are untrusted. Serve them only through `attachment-response.ts`.
+- Attachment bytes are untrusted. Serve them only through `attachment-response.ts`. Its `storeRedirect` is the one
+  exception to serving them from this origin: after the role check, a browser playing or downloading a run's recording
+  (`sec-fetch-dest` video, audio or document) whose *stored* type is video, audio or zip may get a `302` to a store URL that
+  works for at most five minutes. Never widen that list to HTML, SVG, XML, scripts, PDF, images or unknown bytes, never
+  decide on the file name instead of the stored type, and never sign a URL before the role check.
 
 ## The server is a living application, and a protocol
 

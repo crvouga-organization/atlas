@@ -564,6 +564,11 @@ test run, so they are treated as untrusted: never sniffed, never allowed to run 
 another site. Videos can be sought (HTTP range requests). Every route that serves attachment bytes must go
 through here (or add {@link UNTRUSTED_HEADERS}); it never reads from a store itself.
 
+The one exception to "through the server" is decided here too, by {@link storeRedirect}: a large recording a browser
+plays or downloads may be sent straight from the store (a `302` to a URL that works for a few minutes), when the store
+can sign one and the stored media type is one that cannot run (video, audio, a zip). It is served from the store's own
+origin, never this one, so it can reach nothing of Atlas's.
+
 See docs/report-contract.md (evidence rule 8)
 
 #### `UNTRUSTED_HEADERS`
@@ -591,6 +596,42 @@ A single `bytes=a-b`, `bytes=a-` or `bytes=-n` range answers 206, an unsatisfiab
 not understood and get the whole body (200).
 
 - `etag`: A strong validator the caller derives from content identity (it is sent as given, so include the quotes).
+
+#### `redirectableType`
+
+```ts
+export function redirectableType(contentType: string): boolean
+```
+
+Is this stored media type one a browser may be sent to the store for? Parameters (`; codecs=…`) are ignored.
+
+#### `REDIRECT_SECONDS`
+
+```ts
+export const REDIRECT_SECONDS = …
+```
+
+How long a download URL from {@link storeRedirect} works, in seconds. A player that seeks later asks Atlas again.
+
+#### `storeRedirect`
+
+```ts
+export async function storeRedirect(request: Request, store: ObjectStore, key: string): Promise<Response | null>
+```
+
+A `302` to a short-lived URL of `key` in `store`, or `null` to serve the bytes through the server as usual. Call it only
+after the caller's role was checked: it is answered only when the store can sign URLs (`SignedDownloads`), the object
+exists, its stored media type is {@link redirectableType}, and the request is a browser playing or downloading it
+(`sec-fetch-dest` of `video`, `audio` or `document`). A script's `fetch` (which would need the store to allow this
+origin) and a client that is not a browser always get the bytes from the server. The answer is never cached
+(`private, no-store`) and sends no referrer. A store that fails to sign is answered `null`, not an error.
+
+**Example**
+
+```ts
+const redirect = await storeRedirect(request, store, `layers/runs/${id}/clip.webm`);
+if (redirect) return redirect;
+```
 
 ### AWS credential lookup
 
@@ -5755,6 +5796,26 @@ export function isPaged(store: ObjectStore): store is ObjectStore & PagedListing
 
 Whether a store also implements `PagedListing`.
 
+#### `SignedDownloads`
+
+```ts
+export interface SignedDownloads {
+  signedUrl(key: string, options: { readonly expiresInSeconds: number }): Promise<{ readonly url: string; readonly contentType: string; readonly size: number | null } | null>;
+}
+```
+
+Optional, beyond the seven methods: a short-lived URL anyone holding it may read one object from, and the object's stored
+media type and size, so a server can send a large download straight from the store instead of through itself. `null`
+when the key is missing. A store without it is always read through `get`.
+
+#### `canSign`
+
+```ts
+export function canSign(store: ObjectStore): store is ObjectStore & SignedDownloads
+```
+
+Whether a store can hand out short-lived download URLs (`SignedDownloads`).
+
 ### Consumer package-manager commands
 
 Source: `packages/reports/src/package-managers.ts`. Import: `@crvouga/atlas/reports/package-managers`
@@ -8802,13 +8863,21 @@ Lists the newest `limit` (default 100) runs in the store, newest first by `start
 newest first, so one page of it is enough; entries never change, so `cache` (catalog key to summary) lets a
 long-lived reader open each only once. A catalog entry that is empty or not JSON is skipped.
 
+#### `runFileKey`
+
+```ts
+export function runFileKey(id: string, relative: string): string | null
+```
+
+The store key of one file of a run, or `null` for an `id` that is not a plain run name or a `relative` path with an empty, `.`, `..` or backslash segment, so a path can never leave the run.
+
 #### `readRunFile`
 
 ```ts
 export async function readRunFile(store: ObjectStore, id: string, relative: string): Promise<StoredObject | null>
 ```
 
-Reads one file of a run, or `null` when it is missing. Also `null`, without reading, for an `id` that is not a plain run name or a `relative` path with an empty, `.`, `..` or backslash segment, so a path can never leave the run.
+Reads one file of a run, or `null` when it is missing. Also `null`, without reading, for a path {@link runFileKey} refuses.
 
 ### Run comparison
 
@@ -9186,7 +9255,7 @@ permission); `status` and `code` are what the service answered, `null` when it w
 #### `S3Store`
 
 ```ts
-export type S3Store = ObjectStore & PagedListing & {
+export type S3Store = ObjectStore & PagedListing & SignedDownloads & {
   /** A description with no secrets: `s3://bucket/prefix (us-east-1)`. */
   readonly label: string;
   /** Where the credentials came from, once a request has been made. */
@@ -9216,7 +9285,7 @@ is followed, and expired credentials are refreshed once.
 Behaviour to know: a missing key reads as `null`/`false` only when S3 answers 404. For an account without
 `s3:ListBucket`, S3 answers 403 for a missing key, which throws `S3Error` with a hint: the publishing credentials
 need `s3:GetObject`, `s3:PutObject` and `s3:ListBucket` (`atlas report policy` prints a least-privilege policy).
-`getUri` returns a presigned URL valid for one hour. `deleteMany` sends one request per key, 16 at a time.
+`getUri` returns a presigned URL valid for one hour; `signedUrl` one valid as long as asked, with the stored type and size. `deleteMany` sends one request per key, 16 at a time.
 `listKeys` pages through the whole listing and sorts it; use `listPage` to read part of a large catalog. Nothing is
 checked or created at construction: the first request is the first contact.
 
@@ -10004,6 +10073,7 @@ checked here; the store underneath is responsible for it. Returned keys have the
 - `deleteMany(keys: readonly string[]): Promise<void>` — Removes every `prefix + key`. Throws for an invalid key, before deleting any.
 - `getUri(key: string): Promise<string | null>` — The underlying store's URL for `prefix + key`, or `null`. Throws for an invalid key.
 - `async listKeys(prefix = ''): Promise<readonly string[]>` — Lists keys under `prefix` (relative to this store's prefix) in the underlying store's order, with this store's prefix removed.
+- `signedUrl?: SignedDownloads['signedUrl'];` — A short-lived download URL for `prefix + key`; present only when the store underneath has `signedUrl`. Throws for an invalid key.
 - `listPage?: (prefix: string, options?: { readonly after?: string; readonly limit?: number })` — Paged listing with this store's prefix removed from keys and from `next`; present only when the store underneath has `listPage`.
 - `withPrefix(subPrefix: string): ObjectStore` — A store scoped to this prefix followed by `subPrefix`, over the same underlying store (`a/` then `b/` is `a/b/`).
 
@@ -13924,7 +13994,7 @@ says whether trying again can help; the store already retried before throwing.
 #### `VercelBlobStore`
 
 ```ts
-export type VercelBlobStore = ObjectStore & PagedListing & {
+export type VercelBlobStore = ObjectStore & PagedListing & SignedDownloads & {
   /** A description with no secrets: `vercel-blob://my-project/ (store abc123)`. */
   readonly label: string;
   /**
@@ -13938,6 +14008,16 @@ export type VercelBlobStore = ObjectStore & PagedListing & {
 ```
 
 An `ObjectStore` on Vercel Blob with paged listing, a secret-free label, and a cheap reachability check.
+
+#### `presignedGet`
+
+```ts
+export async function presignedGet(contentHost: string, pathname: string, until: number, delegationUntil: number, delegationToken: string, clientSigningToken: string): Promise<string>
+```
+
+A presigned GET of one private object, as `@vercel/blob` 2.9 makes one (`presignUrl` with `operation: 'get'`): the
+canonical string `operation=get`, `pathname=…` and, when the URL ends before the delegation, `vercel-blob-valid-until=…`,
+sorted and joined by new lines, signed with HMAC-SHA-256 under the client signing token, base64url.
 
 #### `blobStoreIdOf`
 
@@ -13961,7 +14041,8 @@ given; they are read back from the store's private host with the token, uncached
 Throttling, server errors and network failures are retried with jittered backoff.
 
 Behaviour to know: the constructor throws when there is no token, or the token is not a read-write token (the store
-id is read from it). `getUri` always answers `null`: a private object has no URL that works without the token, and a
+id is read from it). `signedUrl` returns a presigned read URL of one object, valid as long as asked (at most the
+hour-long delegation it is signed from), with the stored type and size. `getUri` always answers `null`: a private object has no URL that works without the token, and a
 permanently public one is never handed out. `listKeys` pages through the whole listing and sorts it. `listPage`
 continues from the service's cursor when it is asked for the page after the one it last returned, and otherwise
 lists the prefix and filters it, so it is always correct and usually one request. `deleteMany` sends 100 keys per request.

@@ -393,6 +393,19 @@ edit, and the server's time. Nothing about the layer, its results or the report'
 See [Tagging artifacts and demos](rich-evidence.md#tagging-artifacts-and-demos) for the tag rules. Reviewer tags are
 shown in the viewer's evidence; the tests API (`artifactTag`) searches the producers' tags.
 
+## Recordings from the store
+
+A server can send a browser that plays or downloads a run's recording (`/api/data/runs/<id>/<file>`) straight to the store
+instead of streaming every byte itself: `createAtlasServer({ redirectDownloads: true })`, which the serverless handler
+turns on (`ATLAS_REDIRECT_DOWNLOADS=0` to keep it off). After the read role is checked, a request whose `sec-fetch-dest` is
+`video`, `audio` or `document` for an object whose **stored** type is video, audio or zip is answered `302` to a URL of the
+store that works for five minutes (S3 presigns one; Vercel Blob signs one from an hour-long delegation, so one API request
+serves many downloads). The browser sends its `Range` there, and the store serves it from its own origin, which can reach
+nothing of Atlas's. Everything else is served by the server as before: pages, SVG, images and unknown types; requests
+from scripts (which would need the store to allow this origin) and from clients that are not browsers; stores that cannot
+sign; and attachments of test results, which are packed several to a compressed chunk, so the store holds no object that
+is just that file. Leave it off when browsers cannot reach the store's address (a bucket on a private network).
+
 ## Reading recordings back
 
 `POST /api/reports/recordings/verification` (publish, `Authorization: Bearer`) reads the stored videos of the newest layers
