@@ -21,6 +21,7 @@ import type { ObjectStore } from './object-store';
 import { httpStore, type HttpStore } from './http-store';
 import { s3Store, type S3Store } from './s3-store';
 import { atlasHeaders } from './request-headers';
+import { ciIdentity } from './ci-identity';
 import { vercelBlobStore, type VercelBlobStore } from './vercel-blob-store';
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -118,7 +119,9 @@ export function openStore(spec: string, options: { readonly base: string; readon
     const token = serverToken(env, options.role ?? { id: '', soleServer: true });
     if (token) refuseClearToken(location.url, env);
     const headers = atlasHeaders(env);
-    const server = httpStore({ url: location.url, headers, ...(env.ATLAS_PROJECT ? { project: env.ATLAS_PROJECT } : {}), ...(token ? { token } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
+    // Without a token, CI that can prove which repository it is publishes as that repository (trusted publishing).
+    const identity = token ? null : ciIdentity(location.url, env, options.fetch ? { fetch: options.fetch } : {});
+    const server = httpStore({ url: location.url, headers, ...(env.ATLAS_PROJECT ? { project: env.ATLAS_PROJECT } : {}), ...(token ? { token } : {}), ...(identity ? { identity } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
     return { store: server, label: server.label, location, server };
   }
   if (location.kind === 'vercel-blob') {

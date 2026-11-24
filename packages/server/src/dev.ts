@@ -11,7 +11,7 @@ import path from 'node:path';
 import { connectStorage, serverOptionsOf, type ServeIo } from './main';
 import { createAtlasServer } from './app';
 import { ConfigError, loadServerConfig, SERVER_USAGE } from './config';
-import { describeS3, S3ConfigError } from './storage';
+import { describeStorage, S3ConfigError } from './storage';
 import { userStateStore } from './user-state';
 import { listen } from './host';
 import { storedSettings } from './settings';
@@ -73,7 +73,7 @@ export async function devMain(argv: readonly string[], io: ServeIo): Promise<num
     throw error;
   }
   vite.printUrls();
-  io.out(`Reports are stored in ${describeS3(config.s3)}. Publish with: ATLAS_STORE=${vite.resolvedUrls?.local[0] ?? `http://localhost:${publicPort}`} atlas report publish …\n`);
+  io.out(`Reports are stored in ${describeStorage(config.storage)}. Publish with: ATLAS_STORE=${vite.resolvedUrls?.local[0] ?? `http://localhost:${publicPort}`} atlas report publish …\n`);
 
   await new Promise<void>(resolve => {
     io.signal?.addEventListener('abort', () => resolve(), { once: true });

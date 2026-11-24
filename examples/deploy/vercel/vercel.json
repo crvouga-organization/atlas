@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/atlas.ts": { "maxDuration": 300, "includeFiles": "atlas-site/**" }
+  },
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api/atlas?__atlas_path=/$1" }
+  ],
+  "crons": [
+    { "path": "/api/cron", "schedule": "17 4 * * *" }
+  ]
+}

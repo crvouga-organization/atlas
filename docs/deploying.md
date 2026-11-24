@@ -108,9 +108,8 @@ To move an existing deployment's layers into Blob, merge them: the report read f
 atlas report merge --store s3://my-bucket/atlas/my-project --into vercel-blob://atlas/my-project
 ```
 
-The Atlas server (`atlas serve`) still keeps its state in S3 only; running the server itself on Vercel is tracked in
-[issue #117](https://github.com/crvouga/atlas/issues/117). `bun test vercel-blob-store.integration` runs the store
-against a real Blob store when `ATLAS_TEST_BLOB_TOKEN` names one.
+The server can keep everything in a Blob store too ([below](#vercel)). `bun test vercel-blob-store.integration` runs
+the store against a real Blob store when `ATLAS_TEST_BLOB_TOKEN` names one.
 
 ## 2. Check it
 
@@ -149,6 +148,10 @@ export ATLAS_TOKEN=…                             # a publish token of the serv
 bun test --reporter=junit --reporter-outfile=out.xml
 bunx atlas report publish --producer unit --junit out.xml --specs ./specs --environment desktop-web
 ```
+
+From GitHub Actions no token is needed at all: give the job `permissions: id-token: write`, leave `ATLAS_TOKEN`
+unset, and a server that trusts the repository accepts the job's own identity ([trusted
+publishing](server.md#trusted-publishing)).
 
 The result is in everyone's view within a few milliseconds, with no bucket credentials anywhere, and no
 artifacts to merge. To show a long suite *while it runs*, stream it: `my-suite --json | atlas report stream
@@ -242,6 +245,48 @@ bunx atlas report publish --producer statecharts --environment desktop-web \
 A run is uploaded only when its privacy scan passed: the same rule the static client applies.
 
 ## 4. The server
+
+### Vercel
+
+The quickest way to run the server: no container, bucket or proxy, and CI publishes with no secret.
+[`examples/deploy/vercel`](https://github.com/crvouga/atlas/tree/main/examples/deploy/vercel) is a template with a
+**Deploy to Vercel** button. It creates the project and a Blob store, and asks for two tokens (`ATLAS_TOKEN` for the admin,
+`ATLAS_READ_TOKEN` for people who look). The template is one function file and a `vercel.json`, with no Atlas logic in
+it:
+
+```ts
+// api/atlas.ts: the viewer and the API, every path rewritten to it
+import { createAtlasHandler } from '@crvouga/atlas/server/serverless';
+const handle = createAtlasHandler();
+export const GET = handle, HEAD = handle, POST = handle, PUT = handle, PATCH = handle, DELETE = handle, OPTIONS = handle;
+```
+
+What changes on a function host, and what does not:
+
+- **Storage** is the project's private Blob store, picked up from `BLOB_READ_WRITE_TOKEN`
+  ([details](server.md#or-a-vercel-blob-store)). Every instance reads the same store and only caches it, so any number of
+  them show the same report.
+- **No timers.** A request looks at the store when the last look is older than `ATLAS_REFRESH_SECONDS`. The daily
+  `/api/cron` run (Vercel Cron, with `CRON_SECRET`; or the admin token) applies a saved garbage collection policy when it is due.
+- **Large files go straight to Blob.** A function accepts about 4.5 MB per request, so `GET /api/server` says
+  `uploads.directOverBytes` (4 MiB; `ATLAS_DIRECT_UPLOAD_OVER_BYTES`). A publisher sends larger files to Blob with a
+  one-time token good for that one key, size and type, and the server checks what arrived as it checks any upload.
+- **Live updates** come over a stream the server ends after 4 minutes (`ATLAS_STREAM_MAX_SECONDS`), before the
+  function's time limit; the viewer reconnects by itself.
+- **Publishing from CI** needs no token: the template trusts the GitHub account it was deployed into ([trusted
+  publishing](server.md#trusted-publishing)). Keep Vercel Authentication off for the production domain, which is
+  Vercel's default, or CI needs its bypass secret in `ATLAS_HEADERS` as well.
+- **Updates are automatic.** Dependabot proposes each release and the template's workflow merges minor and patch ones;
+  Vercel redeploys on the merge.
+- **A configuration problem is a page.** Until storage and tokens are right, every request is answered with the
+  banner that names what to set. A deployment with neither tokens nor trusted publishers refuses to serve, so it is
+  never open to the world.
+
+The settings page at `/admin` needs Bun's bundler, which a Node function does not have. There it explains how to
+save a garbage collection policy through the API (`PUT /api/settings/gc` with the admin token), and settings come from
+environment variables.
+
+### A process of its own
 
 ```sh
 atlas serve                    # ATLAS_S3_* says where; listens on :8080

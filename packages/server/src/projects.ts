@@ -4,7 +4,7 @@
  */
 import { ProjectSlugSchema } from '../../schema/src/project';
 import { ObjectStoreWithPrefix } from '../../reports/src/store-prefix';
-import { writeUtf8 } from '../../reports/src/object-io';
+import { readUtf8, writeUtf8 } from '../../reports/src/object-io';
 import { createAuth } from './auth';
 import { problemResponse } from './problem';
 import type { AtlasServer, AtlasServerOptions } from './app';
@@ -13,6 +13,8 @@ import type { HttpStore } from '../../reports/src/http-store';
 import type { GcPolicy, GcRun } from '../../schema/src/user-state';
 
 const REGISTRY = 'server/projects/';
+/** When garbage collection last ran from `maintain`, kept in the store: nothing else survives between serverless invocations. */
+const GC_LAST = 'server/gc-last.json';
 const SCOPED = /^\/api\/projects\/([^/]+)(\/.*)$/;
 const GLOBAL = new Set(['/api/settings', '/api/settings/gc', '/api/settings/gc/run', '/api/projects', '/api/openapi.json', '/api/server']);
 const scopeStore = (store: ObjectStore, slug: string) => typeof (store as Partial<HttpStore>).forProject === 'function'
@@ -21,7 +23,7 @@ const scopeStore = (store: ObjectStore, slug: string) => typeof (store as Partia
 /** Wrap the single-project protocol in project selection. Auth, upload validation and composition stay identical. */
 export function projectServer(options: AtlasServerOptions, create: (options: AtlasServerOptions) => AtlasServer): AtlasServer {
   const base = create(options);
-  const auth = createAuth(options.tokens ?? [], options.anonymousRead ?? false);
+  const auth = createAuth(options.tokens ?? [], options.anonymousRead ?? false, options.trust);
   const write = options.backends.find(backend => backend.id === options.write)!.store;
   const registry = options.liveStore ?? write;
   const known = new Set<string>();
@@ -108,10 +110,25 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
   const routes = [...base.routes, { method: 'GET', path: '/api/projects' }, { method: 'POST', path: '/api/settings/gc/run' }];
   for (const route of base.routes) if (route.path.startsWith('/api/') && route.path !== '/api/*' && !GLOBAL.has(route.path)) routes.push({ method: route.method, path: route.path.replace('/api/', '/api/projects/:project/') });
 
-  return { ...base, routes, ready,
+  /** One scheduled pass: what the timers above do, for a host where nothing runs between requests. */
+  async function maintain(): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string }> {
+    await base.ready;
+    await Promise.allSettled([base.index.refresh(), discover()]);
+    if (!options.gc) return { gc: null, note: 'Garbage collection is managed by the embedding application.' };
+    const policy = await options.gc.policy();
+    if (!policy?.enabled) return { gc: null, note: policy ? 'The saved garbage collection policy is disabled.' : 'No garbage collection policy has been saved: nothing is deleted.' };
+    const last = await readUtf8(registry, GC_LAST).then(text => Number((text ? JSON.parse(text) : {}).at) || 0, () => 0);
+    if (clock() - last < policy.intervalHours * 3_600_000) return { gc: null, note: `Garbage collection ran ${new Date(last).toISOString()}; the next pass is due after ${policy.intervalHours} h.` };
+    await writeUtf8(registry, GC_LAST, JSON.stringify({ at: clock() }), 'application/json');
+    lastCollectedAt = clock();
+    return { gc: await collectAll(policy, false), note: 'Garbage collection ran.' };
+  }
+
+  return { ...base, routes, ready, maintain,
     async fetch(request) {
       try {
         if (closed) return problemResponse(503, 'Atlas is stopping.');
+        if (options.trust) await auth.prepare(request);
         const url = new URL(request.url);
         if (url.pathname === '/api/settings/gc/run' && request.method === 'POST') {
           const verdict = auth.check(request, 'admin');

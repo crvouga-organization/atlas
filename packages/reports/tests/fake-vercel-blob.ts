@@ -11,12 +11,13 @@ export const BLOB_CONTENT = 'https://teststore.private.blob.vercel-storage.com';
 
 type Stored = { bytes: Uint8Array; contentType: string };
 
-export function fakeVercelBlob(options: { token?: string } = {}) {
+export function fakeVercelBlob(options: { token?: string; /** A public store refuses private writes, as the service does. */ access?: 'private' | 'public' } = {}) {
   const token = options.token ?? BLOB_TOKEN;
   const objects = new Map<string, Stored>();
   const requests: { method: string; url: string; headers: Record<string, string> }[] = [];
   /** Answers the next N requests with 503, to prove retries. */
   let failNext = 0;
+  let uploadsWithClientToken = 0;
   const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   const error = (status: number, code: string, message = code) => json(status, { error: { code, message } });
 
@@ -26,7 +27,19 @@ export function fakeVercelBlob(options: { token?: string } = {}) {
     const headers = Object.fromEntries(new Headers(init.headers).entries());
     requests.push({ method, url: url.toString(), headers });
     if (failNext > 0) { failNext -= 1; return error(503, 'service_unavailable'); }
-    if (headers.authorization !== `Bearer ${token}`) return error(403, 'forbidden', 'Access denied');
+    // A client token, as @vercel/blob makes one: allowed one upload, of one pathname, size and type, until it expires.
+    let client: { pathname: string; validUntil: number; maximumSizeInBytes?: number; allowedContentTypes?: string[] } | null = null;
+    const bearer = headers.authorization?.replace(/^Bearer /, '') ?? '';
+    if (bearer.startsWith('vercel_blob_client_')) {
+      const [, , , storeId, encoded] = bearer.split('_');
+      const [signature, payload] = atob(encoded ?? '').split('.');
+      const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(token), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+      const expected = [...new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload ?? '')))].map(byte => byte.toString(16).padStart(2, '0')).join('');
+      if (storeId !== token.split('_')[3] || signature !== expected) return error(403, 'forbidden', 'Invalid client token');
+      client = JSON.parse(atob(payload!));
+      if (client!.validUntil < Date.now()) return error(400, 'bad_request', 'Token expired');
+      if (method !== 'PUT') return error(403, 'client_token_not_allowed', 'This operation is not available when using a client token');
+    } else if (headers.authorization !== `Bearer ${token}`) return error(403, 'forbidden', 'Access denied');
 
     if (url.origin === new URL(BLOB_CONTENT).origin) {
       const pathname = url.pathname.slice(1).split('/').map(decodeURIComponent).join('/');
@@ -41,10 +54,14 @@ export function fakeVercelBlob(options: { token?: string } = {}) {
     if (method === 'PUT' && (route === '/' || route === '')) {
       let pathname = url.searchParams.get('pathname') ?? '';
       if (!pathname || pathname.includes('//')) return error(400, 'bad_request', 'invalid pathname');
-      if (headers['x-vercel-blob-access'] !== 'private') return error(400, 'bad_request', 'this store is private');
+      if (headers['x-vercel-blob-access'] !== (options.access ?? 'private')) return error(400, 'bad_request', `Cannot use ${headers['x-vercel-blob-access']} access on a ${options.access ?? 'private'} store`);
+      if (client && client.pathname !== pathname) return error(400, 'bad_request', 'The "pathname" does not match the token payload');
+      if (client?.allowedContentTypes && !client.allowedContentTypes.includes(headers['x-content-type'] ?? '')) return error(400, 'bad_request', 'contentType is not allowed');
       if (headers['x-add-random-suffix'] !== '0') pathname = pathname.replace(/(\.[^./]*)?$/, `-${Math.random().toString(36).slice(2, 8)}$1`);
       if (objects.has(pathname) && headers['x-allow-overwrite'] !== '1') return error(400, 'bad_request', 'This blob already exists');
       const bytes = new Uint8Array(await new Response(init.body as BodyInit).arrayBuffer());
+      if (client?.maximumSizeInBytes !== undefined && bytes.length > client.maximumSizeInBytes) return error(400, 'bad_request', 'the file length cannot be greater than the maximum');
+      uploadsWithClientToken += client ? 1 : 0;
       objects.set(pathname, { bytes, contentType: headers['x-content-type'] ?? 'application/octet-stream' });
       return json(200, { url: `${BLOB_CONTENT}/${pathname}`, pathname, contentType: headers['x-content-type'] });
     }
@@ -76,6 +93,8 @@ export function fakeVercelBlob(options: { token?: string } = {}) {
     objects,
     requests,
     failNext(count: number) { failNext = count; },
+    /** How many objects arrived with a client token (straight from a publisher) rather than the store's token. */
+    clientUploads: () => uploadsWithClientToken,
     /** The options that point a store at this fake (its content host is the default one, so it is not given). */
     options: { token, apiUrl: BLOB_API, sleep: async () => {} }
   };

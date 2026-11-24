@@ -458,6 +458,44 @@ Scoped to one project. The same project may be selected on the unprefixed API us
 
 Responses: `200` Already there with the same bytes.; `201` Stored.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `409` A dependency has not been uploaded yet, or other bytes are already stored under this key.; `413` Over `limits.maxObjectMiB`.; `422` Not a key Atlas writes, or the content is not what its name says.
 
+### Send a large file straight to storage
+
+`POST /api/store/{key}` · role: publish
+
+For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.
+
+1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
+2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).
+3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
+
+Only files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.
+
+- `key` (path, required): An object key under `layers/`, such as `layers/manifests/<id>.json`. It contains slashes, which are not percent-encoded; every other character is.
+- `upload` (query): `start` or `complete`.
+- `project` (query): Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.
+
+Responses: `200` `start`: where to send the bytes, or that the blob is already there.; `201` `complete`: checked and accepted.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `404` This server takes uploads only through `PUT`.; `413` Over `limits.maxObjectMiB`.; `422` Not a file key, nothing arrived, or what arrived is not what its name says (and was deleted).
+
+### Send a large file straight to storage
+
+`POST /api/projects/{project}/store/{key}` · role: publish
+
+For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.
+
+1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
+2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).
+3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
+
+Only files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.
+
+Scoped to one project. The same project may be selected on the unprefixed API using ?project= or X-Atlas-Project. Unknown projects return 404 on reads and are created by an authenticated upload.
+
+- `project` (path, required): Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.
+- `key` (path, required): An object key under `layers/`, such as `layers/manifests/<id>.json`. It contains slashes, which are not percent-encoded; every other character is.
+- `upload` (query): `start` or `complete`.
+
+Responses: `200` `start`: where to send the bytes, or that the blob is already there.; `201` `complete`: checked and accepted.; `401` No token, or an unknown one. Send `Authorization: Bearer <token>`.; `403` The token is known but its role may not do this.; `404` This server takes uploads only through `PUT`.; `413` Over `limits.maxObjectMiB`.; `422` Not a file key, nothing arrived, or what arrived is not what its name says (and was deleted).
+
 ### Remove a scratch object
 
 `DELETE /api/store/{key}` · role: publish

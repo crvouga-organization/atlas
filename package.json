@@ -52,6 +52,7 @@
     "./vitest": "./packages/vitest/src/index.ts",
     "./schema": "./packages/schema/src/index.ts",
     "./server": "./packages/server/src/index.ts",
+    "./server/serverless": "./packages/server/src/serverless.ts",
     "./critics": "./packages/critics/src/index.ts",
     "./critics/uiclip": "./packages/critics/src/uiclip.ts",
     "./critics/llm": "./packages/critics/src/llm.ts",
@@ -122,6 +123,10 @@
       "./server": {
         "types": "./dist/server/src/index.d.ts",
         "default": "./dist/server/src/index.js"
+      },
+      "./server/serverless": {
+        "types": "./dist/server/src/serverless.d.ts",
+        "default": "./dist/server/src/serverless.js"
       },
       "./critics": {
         "types": "./dist/critics/src/index.d.ts",

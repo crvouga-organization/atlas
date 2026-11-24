@@ -51,6 +51,11 @@ export class VercelBlobError extends Error {
 export type VercelBlobStore = ObjectStore & PagedListing & {
   /** A description with no secrets: `vercel-blob://my-project/ (store abc123)`. */
   readonly label: string;
+  /**
+   * A request someone else may make to write exactly this key, this size and this type, for a short while, without the
+   * store's token: a client token signed with it. For files too large to pass through a serverless function.
+   */
+  uploadTarget(key: string, upload: { readonly size: number; readonly contentType: string; readonly validForMs?: number }): Promise<{ readonly method: 'PUT'; readonly url: string; readonly headers: Readonly<Record<string, string>>; readonly expiresAt: string }>;
   /** One cheap round trip: can this store be listed with this token? Used by `atlas report doctor`. */
   ping(): Promise<{ readonly ok: boolean; readonly ms: number; readonly error?: string }>;
 };
@@ -241,6 +246,20 @@ export function vercelBlobStore(options: VercelBlobStoreOptions = {}): VercelBlo
 
     withPrefix(extra) {
       return new ObjectStoreWithPrefix(store, extra);
+    },
+
+    async uploadTarget(key, upload) {
+      const pathname = base + key;
+      const validUntil = Date.now() + (upload.validForMs ?? 15 * 60_000);
+      // The client token @vercel/blob makes: an HMAC of the allowed upload, signed with the read-write token, good for this one pathname.
+      const payload = btoa(JSON.stringify({ pathname, validUntil, maximumSizeInBytes: upload.size, allowedContentTypes: [upload.contentType], addRandomSuffix: false, allowOverwrite: true }));
+      const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(token), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+      const signature = [...new Uint8Array(await crypto.subtle.sign('HMAC', keyMaterial, new TextEncoder().encode(payload)))].map(byte => byte.toString(16).padStart(2, '0')).join('');
+      const clientToken = `vercel_blob_client_${storeId}_${btoa(`${signature}.${payload}`)}`;
+      return {
+        method: 'PUT', url: `${api}/?${new URLSearchParams({ pathname })}`, expiresAt: new Date(validUntil).toISOString(),
+        headers: { authorization: `Bearer ${clientToken}`, 'x-api-version': API_VERSION, 'x-vercel-blob-store-id': storeId, 'x-vercel-blob-access': 'private', 'x-content-type': upload.contentType, 'x-add-random-suffix': '0', 'x-allow-overwrite': '1' }
+      };
     },
 
     async ping() {

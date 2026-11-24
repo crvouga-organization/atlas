@@ -26,7 +26,7 @@ development and in production.
   the same layers give the same report ([the contract](report-contract.md)).
 
 - [Run it](#run-it) · [Required S3 storage](#required-s3-storage) · [User state and garbage collection](#user-state-and-garbage-collection)
-- [Configuration](#configuration) · [Storage](#storage) · [Tokens and roles](#tokens-and-roles)
+- [Configuration](#configuration) · [Storage](#storage) · [Tokens and roles](#tokens-and-roles) · [Trusted publishing](#trusted-publishing)
 - [Sending results](#sending-results) · [Streaming](#streaming) · [API reference](#api-reference)
 - [What the server refuses](#what-the-server-refuses) · [Performance](#performance) · [Operating it](#operating-it)
 
@@ -108,6 +108,21 @@ what S3 answered, when S3 was reached), never prints a secret, and exits with st
 
 Credentials that S3 rejects, a bucket that does not exist and a user state object that cannot be read stop the
 server in the same way, with the answer from S3 in the banner. `atlas dev` behaves the same.
+
+### Or a Vercel Blob store
+
+The same storage may be a **private Vercel Blob store** instead of a bucket. It is chosen by `ATLAS_STORAGE=vercel-blob`,
+or without it when `BLOB_READ_WRITE_TOKEN` is set and no `ATLAS_S3_*` variable is, which is what a Vercel project with a
+connected Blob store has. Nothing else changes: it holds the same layers and the same user state, and the server checks
+it the same way before serving, with the Blob variables in the banner.
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `BLOB_READ_WRITE_TOKEN` | yes | Read-write token of a **private** Blob store. Vercel sets it when the store is connected to the project |
+| `ATLAS_BLOB_PREFIX` | no | A folder inside the store for everything Atlas writes. Default: the store root |
+
+To move a deployment from a bucket to Blob, merge its layers across (`atlas report merge --store s3://… --into
+vercel-blob://…`, [details](deploying.md#vercel-blob)).
 
 ## User state and garbage collection
 
@@ -196,6 +211,9 @@ is said in words and the server does not start. The file has a published
 | Folder in the bucket for everything Atlas writes (optional) | `storage.s3.prefix` |  | `ATLAS_S3_PREFIX` | the bucket root |
 | Path-style bucket addressing (`0` for virtual-hosted) (optional) | `storage.s3.pathStyle` |  | `ATLAS_S3_PATH_STYLE` | yes |
 | Session token for temporary credentials (optional) | `storage.s3.sessionToken` |  | `ATLAS_S3_SESSION_TOKEN` | none |
+| Which storage keeps everything: `s3` or `vercel-blob` (a private Blob store, with `BLOB_READ_WRITE_TOKEN` and optionally `ATLAS_BLOB_PREFIX`) | `storage.kind` |  | `ATLAS_STORAGE` | `vercel-blob` when `BLOB_READ_WRITE_TOKEN` is the only storage set, else `s3` |
+| CI repositories that may publish without a token, by OIDC identity: `github:<owner>`, `github:<owner>/<repo>` or `github:<owner>/<repo>@<ref>` (comma-separated; `none` for nobody) | `auth.trustedPublishers` |  | `ATLAS_TRUSTED_PUBLISHERS` | the GitHub owner the server was deployed from on Vercel or Railway, else nobody |
+| The URLs this server is published at (comma-separated); a CI identity token must be addressed to one. Set it when callers reach the server without a platform router in front | `publicUrls` |  | `ATLAS_PUBLIC_URL` | the host each request arrived on |
 | Address to listen on | `host` | `--host <address>` | `ATLAS_HOST`, `HOST` | `127.0.0.1` |
 | Port (`0` picks a free one) | `port` | `--port <n>` | `ATLAS_PORT`, `PORT` | `8080` |
 | The built client | `site` | `--site <dir>` | `ATLAS_SITE` | `./atlas-site`, else built once |
@@ -258,7 +276,41 @@ with `tokenEnv` so the file holds no secret.
   `--insecure` (for when a proxy in front does the signing in).
 - `/healthz` and `/readyz` never need a token, so a load balancer can use them.
 - Only this server's own clients need tokens; Atlas does not do accounts. Put it behind what your company already
-  uses (Cloudflare Access, an ALB with OIDC, `oauth2-proxy`, Tailscale) and TLS ends there too.
+  uses (Cloudflare Access, an ALB with OIDC, `oauth2-proxy`, Tailscale) and TLS ends there too. Machines then reach
+  it with that platform's header in `ATLAS_HEADERS` ([details](deploying.md#a-server-behind-a-sign-in)).
+
+### Trusted publishing
+
+CI can publish **with no secret at all**. A GitHub Actions job with `permissions: id-token: write` asks GitHub for a
+short-lived OIDC token that names its repository, branch and workflow, addressed to this server; `atlas report
+publish`, `atlas report stream`, the reporters and `httpStore` do this by themselves when no `ATLAS_TOKEN` is set. The
+server accepts the token as a **publish** token (it may upload and read, so the gate needs no secret either) when:
+
+- GitHub's signature verifies (the keys are fetched from GitHub and cached), it has not expired, and its audience is
+  this server, so a token minted for another server is useless here;
+- its repository is on the allowlist, `ATLAS_TRUSTED_PUBLISHERS`: `github:<owner>`, `github:<owner>/<repo>` or
+  `github:<owner>/<repo>@<ref>`, comma-separated (`none` trusts nobody);
+- the owner's numeric GitHub id is the one first seen under that name. The pin is kept in the store
+  (`server/trusted-publishers.json`), so an account renamed or re-registered under the same name is not trusted.
+
+**Without `ATLAS_TRUSTED_PUBLISHERS`**, a server deployed by Vercel or Railway from a GitHub repository trusts that
+repository's owner, which is every repository of the same account or organization. Pull requests from forks are
+given no identity token, so they cannot publish. People looking at the report, critics and administrators still need
+tokens, and a server with trusted publishers but no tokens serves no one who is not CI.
+
+When people can reach the server without a platform's router in front (a VM with a public address), set
+`ATLAS_PUBLIC_URL` to its URL: the token's audience is then checked against it rather than against the Host header a
+caller chose. An IP allowlist would not do the same job: GitHub's hosted runners share their addresses with every other
+GitHub user.
+
+```yaml
+permissions:
+  id-token: write
+env:
+  ATLAS_STORE: https://atlas.example.com
+steps:
+  - run: npx atlas report publish --producer unit --junit out.xml
+```
 
 ## Sending results
 
@@ -520,6 +572,8 @@ curl "$ATLAS_SERVER_URL/api/projects/$ATLAS_PROJECT/reports/tests?format=markdow
 | `HEAD /api/projects/{project}/store/{key}` | read | Does an object exist. |
 | `PUT /api/store/{key}` | critic | Upload an object. |
 | `PUT /api/projects/{project}/store/{key}` | critic | Upload an object. |
+| `POST /api/store/{key}` | publish | Send a large file straight to storage. |
+| `POST /api/projects/{project}/store/{key}` | publish | Send a large file straight to storage. |
 | `DELETE /api/store/{key}` | publish | Remove a scratch object. |
 | `DELETE /api/projects/{project}/store/{key}` | publish | Remove a scratch object. |
 | `GET /api/reports/tests` | read | Every test, with insights, facets and history statistics. |

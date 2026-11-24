@@ -18,7 +18,8 @@ import { parseArgs } from 'node:util';
 
 import { ServerConfigSchema, type ServerConfig, type ServerRole } from '../../schema/src/server-config';
 import { buildInfo, type BuildInfo } from './build-info';
-import { resolveS3Config, S3_VARIABLES, type S3Config } from './storage';
+import { resolveStorage, S3_VARIABLES, type S3Config, type StorageConfig } from './storage';
+import { describeRule, publisherRulesOf, type PublisherRule } from './trusted-publishing';
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -26,8 +27,16 @@ type Env = Readonly<Record<string, string | undefined>>;
 export type ResolvedToken = { readonly name: string; readonly role: ServerRole; readonly token: string };
 /** The configuration the server runs with: the file, then the environment, then the flags, checked and resolved. */
 export type ResolvedServerConfig = Omit<ServerConfig, 'auth'> & {
-  /** The S3-compatible storage that holds every report and all user state. Required; there is no other. */
-  readonly s3: S3Config;
+  /** The object storage that holds every report and all user state: an S3-compatible bucket or a Vercel Blob store. Required. */
+  readonly storage: StorageConfig;
+  /** The S3 settings, when the storage is S3. */
+  readonly s3?: S3Config;
+  /** CI repositories that may publish with an OIDC identity token instead of a publish token. */
+  readonly trustedPublishers: readonly PublisherRule[];
+  /** Where the trusted publishers came from, for the log. */
+  readonly trustedPublishersSource: string;
+  /** The URLs this server is published at (`ATLAS_PUBLIC_URL`); a CI identity token must be addressed to one. Empty: the request's host. */
+  readonly publicUrls: readonly string[];
   readonly tokens: readonly ResolvedToken[];
   readonly anonymousRead: boolean;
   readonly insecure: boolean;
@@ -81,19 +90,22 @@ export type ServerSetting = {
 export const SERVER_SETTINGS: readonly ServerSetting[] = [
   // Storage is required and comes only from the environment: reports and user state live in S3 and nowhere else.
   ...(Object.entries({
-    ATLAS_S3_ENDPOINT: ['endpoint', 'S3 endpoint URL', c => c.s3.endpoint, 'https://s3.example.com'],
-    ATLAS_S3_BUCKET: ['bucket', 'Bucket for all reports and user state', c => c.s3.bucket, 'atlas-reports'],
-    ATLAS_S3_REGION: ['region', 'Bucket region', c => c.s3.region, 'eu-west-1'],
-    ATLAS_S3_ACCESS_KEY_ID: ['accessKeyId', 'Access key id', c => c.s3.accessKeyId, 'AKIAEXAMPLE'],
-    ATLAS_S3_SECRET_ACCESS_KEY: ['secretAccessKey', 'Secret access key', c => c.s3.secretAccessKey, 'secret-example-key'],
-    ATLAS_S3_PREFIX: ['prefix', 'Folder in the bucket for everything Atlas writes', c => c.s3.prefix, 'atlas'],
-    ATLAS_S3_PATH_STYLE: ['pathStyle', 'Path-style bucket addressing (`0` for virtual-hosted)', c => c.s3.pathStyle, '0'],
-    ATLAS_S3_SESSION_TOKEN: ['sessionToken', 'Session token for temporary credentials', c => c.s3.sessionToken, 'session-example-token']
+    ATLAS_S3_ENDPOINT: ['endpoint', 'S3 endpoint URL', c => c.s3?.endpoint, 'https://s3.example.com'],
+    ATLAS_S3_BUCKET: ['bucket', 'Bucket for all reports and user state', c => c.s3?.bucket, 'atlas-reports'],
+    ATLAS_S3_REGION: ['region', 'Bucket region', c => c.s3?.region, 'eu-west-1'],
+    ATLAS_S3_ACCESS_KEY_ID: ['accessKeyId', 'Access key id', c => c.s3?.accessKeyId, 'AKIAEXAMPLE'],
+    ATLAS_S3_SECRET_ACCESS_KEY: ['secretAccessKey', 'Secret access key', c => c.s3?.secretAccessKey, 'secret-example-key'],
+    ATLAS_S3_PREFIX: ['prefix', 'Folder in the bucket for everything Atlas writes', c => c.s3?.prefix, 'atlas'],
+    ATLAS_S3_PATH_STYLE: ['pathStyle', 'Path-style bucket addressing (`0` for virtual-hosted)', c => c.s3?.pathStyle, '0'],
+    ATLAS_S3_SESSION_TOKEN: ['sessionToken', 'Session token for temporary credentials', c => c.s3?.sessionToken, 'session-example-token']
   } as Record<string, [string, string, (config: ResolvedServerConfig) => unknown, string]>).map(([variable, [field, summary, read, value]]): ServerSetting => {
     const required = S3_VARIABLES.find(item => item.name === variable)!.required;
     const expected = field === 'pathStyle' ? false : value;
     return { summary: `${summary} (${required ? '**required**' : 'optional'})`, key: `storage.s3.${field}`, flag: null, env: [variable], default: required ? '**none: the server refuses to start**' : field === 'pathStyle' ? 'yes' : field === 'prefix' ? 'the bucket root' : 'none', example: { value, read, expected } };
   })),
+  { summary: 'Which storage keeps everything: `s3` or `vercel-blob` (a private Blob store, with `BLOB_READ_WRITE_TOKEN` and optionally `ATLAS_BLOB_PREFIX`)', key: 'storage.kind', flag: null, env: ['ATLAS_STORAGE'], default: '`vercel-blob` when `BLOB_READ_WRITE_TOKEN` is the only storage set, else `s3`', example: { value: 's3', read: c => c.storage.kind, expected: 's3' } },
+  { summary: 'CI repositories that may publish without a token, by OIDC identity: `github:<owner>`, `github:<owner>/<repo>` or `github:<owner>/<repo>@<ref>` (comma-separated; `none` for nobody)', key: 'auth.trustedPublishers', flag: null, env: ['ATLAS_TRUSTED_PUBLISHERS'], default: 'the GitHub owner the server was deployed from on Vercel or Railway, else nobody', example: { value: 'github:acme,github:other/web@refs/heads/main', read: c => c.trustedPublishers.map(describeRule), expected: ['github:acme', 'github:other/web@refs/heads/main'] } },
+  { summary: 'The URLs this server is published at (comma-separated); a CI identity token must be addressed to one. Set it when callers reach the server without a platform router in front', key: 'publicUrls', flag: null, env: ['ATLAS_PUBLIC_URL'], default: 'the host each request arrived on', example: { value: 'https://atlas.example.com', read: c => c.publicUrls, expected: ['https://atlas.example.com'] } },
   { summary: 'Address to listen on', key: 'host', flag: '--host <address>', env: ['ATLAS_HOST', 'HOST'], default: '`127.0.0.1`', example: { value: '0.0.0.0', read: c => c.host, expected: '0.0.0.0' } },
   { summary: 'Port (`0` picks a free one)', key: 'port', flag: '--port <n>', env: ['ATLAS_PORT', 'PORT'], default: '`8080`', example: { value: '9191', read: c => c.port, expected: 9191 } },
   { summary: 'The built client', key: 'site', flag: '--site <dir>', env: ['ATLAS_SITE'], default: '`./atlas-site`, else built once', example: { value: 'client', read: c => path.basename(c.site ?? ''), expected: 'client' } },
@@ -159,7 +171,7 @@ const truthy = (value: string | undefined) => value === '1' || value === 'true';
 export function loadServerConfig(argv: readonly string[], env: Env, cwd: string, read: (file: string) => string = file => readFileSync(file, 'utf8'), saved: Record<string, unknown> = {}): ResolvedServerConfig {
   const flags = parseFlags(argv);
   // Storage first: nothing else matters while there is nowhere to keep the reports. Throws S3ConfigError naming every variable.
-  const s3 = resolveS3Config(env);
+  const storage = resolveStorage(env);
   const named = flags.config ?? env.ATLAS_CONFIG;
   const file = named ? path.resolve(cwd, named) : existsSync(path.join(cwd, DEFAULT_FILE)) ? path.join(cwd, DEFAULT_FILE) : null;
   let raw: Record<string, unknown> = {};
@@ -221,8 +233,17 @@ export function loadServerConfig(argv: readonly string[], env: Env, cwd: string,
   for (const item of tokens) if (item.token.length < MIN_TOKEN) throw new ConfigError(`Token "${item.name}" is shorter than ${MIN_TOKEN} characters: use a long random one (openssl rand -hex 24)`);
   if (new Set(tokens.map(item => item.token)).size !== tokens.length) throw new ConfigError('Two tokens are the same: each token must say who it is');
 
+  let trusted: ReturnType<typeof publisherRulesOf>;
+  try {
+    trusted = publisherRulesOf(env);
+  } catch (error) {
+    throw new ConfigError(error instanceof Error ? error.message : String(error));
+  }
+  const publicUrls = list(env.ATLAS_PUBLIC_URL);
+  for (const url of publicUrls) if (!/^https?:\/\/[^/?#]+\/?$/.test(url)) throw new ConfigError(`ATLAS_PUBLIC_URL "${url}" must be an origin, like https://atlas.example.com`);
+
   const { auth: _auth, ...rest } = config;
-  const resolved: ResolvedServerConfig = { ...rest, s3, tokens, anonymousRead: config.auth.anonymousRead, insecure: config.auth.insecure, configFile: file, build: buildInfo(env), ...(config.site ? { site: path.resolve(base, config.site) } : {}) };
+  const resolved: ResolvedServerConfig = { ...rest, storage, ...(storage.kind === 's3' ? { s3: storage.s3 } : {}), trustedPublishers: trusted.rules, trustedPublishersSource: trusted.source, publicUrls, tokens, anonymousRead: config.auth.anonymousRead, insecure: config.auth.insecure, configFile: file, build: buildInfo(env), ...(config.site ? { site: path.resolve(base, config.site) } : {}) };
   assertSafeToListen(resolved);
   return resolved;
 }
@@ -230,7 +251,7 @@ export function loadServerConfig(argv: readonly string[], env: Env, cwd: string,
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 /** A server that anyone on the network can upload to must say who may. */
-export function assertSafeToListen(config: Pick<ResolvedServerConfig, 'host' | 'tokens' | 'insecure'>): void {
-  if (config.tokens.length || config.insecure || LOOPBACK.has(config.host)) return;
+export function assertSafeToListen(config: Pick<ResolvedServerConfig, 'host' | 'tokens' | 'insecure'> & { readonly trustedPublishers?: readonly PublisherRule[] }): void {
+  if (config.tokens.length || config.trustedPublishers?.length || config.insecure || LOOPBACK.has(config.host)) return;
   throw new ConfigError(`Listening on ${config.host} with no tokens would let anyone on the network upload results. Set ATLAS_TOKEN (and ATLAS_PUBLISH_TOKEN / ATLAS_READ_TOKEN), or listen on 127.0.0.1, or pass --insecure if something else in front of it does the signing in.`);
 }

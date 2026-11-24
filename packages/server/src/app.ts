@@ -26,6 +26,7 @@ import { layerCatalogKey } from '../../reports/src/layer-store';
 import { createLayersApp } from '../../reports/src/layers-route';
 import type { ReportOutline } from '../../reports/src/layer-types';
 import type { ObjectStore } from '../../reports/src/object-store';
+import type { VercelBlobStore } from '../../reports/src/vercel-blob-store';
 import { readArtifactTagEntries, recordArtifactTags, ArtifactTagError } from '../../reports/src/artifact-tag-store';
 import { publishChecks } from '../../reports/src/publish-checks';
 import { reportStatus } from '../../reports/src/report-status';
@@ -52,6 +53,7 @@ import { collectGarbage, planGarbage } from '../../reports/src/garbage';
 import type { GcPolicy, GcRun } from '../../schema/src/user-state';
 import { Refusal } from './validate';
 import { createAuth, type Auth } from './auth';
+import type { TrustedPublishers } from './trusted-publishing';
 import type { ResolvedToken } from './config';
 import { EventHub } from './events';
 import { projectServer } from './projects';
@@ -75,6 +77,8 @@ export type AtlasServerOptions = {
   readonly liveStore?: ObjectStore;
   readonly tokens?: readonly ResolvedToken[];
   readonly anonymousRead?: boolean;
+  /** CI identities that may publish without a token (OIDC). Shared by every project of the server. */
+  readonly trust?: TrustedPublishers;
   /** The built viewer. Without it, only the API is served. */
   readonly site?: string;
   readonly outlineBranch?: string;
@@ -83,6 +87,19 @@ export type AtlasServerOptions = {
   readonly include?: (layer: LayerHeader) => boolean;
   readonly refreshMs?: number;
   readonly limits?: { readonly maxObjectMiB?: number; readonly maxJsonMiB?: number; readonly maxStreams?: number };
+  /**
+   * For a host where no process runs between requests (serverless functions): before answering, look at the store for
+   * what others wrote when the last look is older than this many milliseconds, and expire silent live runs, instead of
+   * relying on timers. Unset: timers do it.
+   */
+  readonly refreshOnRequestMs?: number;
+  /** End each live stream after this many milliseconds, so a host's maximum request duration never cuts one; the viewer reconnects. */
+  readonly streamMaxMs?: number;
+  /**
+   * Files larger than this many bytes go straight to storage, for a host that refuses large request bodies. Needs a write
+   * store that can make an upload target (Vercel Blob); ignored otherwise.
+   */
+  readonly directUploadOverBytes?: number;
   readonly heartbeatMs?: number;
   /** Producer lease timeout; default 30 seconds. */
   readonly runTimeoutMs?: number;
@@ -118,6 +135,12 @@ export type AtlasServer = {
    * counts. Never throws: a failure is the `error` of the returned run.
    */
   collectGarbage(policy: GcPolicy, options: { readonly dryRun: boolean; readonly project: string }): Promise<GcRun>;
+  /**
+   * What timers do on a long-running server, done once, for a scheduler to call where nothing runs between requests: look
+   * at the store, expire silent live runs, and run garbage collection when a saved, enabled policy is due (the time of the
+   * last pass is kept in the store). Present on the server `createAtlasServer` returns.
+   */
+  maintain?(): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string }>;
   /** Stop refreshing and end every live connection. */
   close(): void;
 };
@@ -147,10 +170,13 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
   const writeBackend = backends.find(backend => backend.id === options.write);
   if (!writeBackend) throw new Error(`The write backend "${options.write}" is not among the backends (${backends.map(backend => backend.id).join(', ')})`);
   const stores: ObjectStore[] = backends.map(backend => backend.store);
-  const auth: Auth = createAuth(options.tokens ?? [], options.anonymousRead ?? false);
+  const auth: Auth = createAuth(options.tokens ?? [], options.anonymousRead ?? false, options.trust);
   const limits = { object: (options.limits?.maxObjectMiB ?? 256) * MiB, json: (options.limits?.maxJsonMiB ?? 32) * MiB };
   const index = new ReportIndex(backends, { now, ...(options.include ? { include: options.include } : {}) });
-  const events = new EventHub({ maxSubscribers: options.limits?.maxStreams ?? 500, heartbeatMs: options.heartbeatMs ?? 15_000 });
+  const events = new EventHub({ maxSubscribers: options.limits?.maxStreams ?? 500, heartbeatMs: options.heartbeatMs ?? 15_000, ...(options.streamMaxMs ? { maxStreamMs: options.streamMaxMs } : {}) });
+  // Direct uploads need a store that can say where a publisher may write one key itself.
+  const uploadTarget = (writeBackend.store as Partial<Pick<VercelBlobStore, 'uploadTarget'>>).uploadTarget?.bind(writeBackend.store);
+  const directOverBytes = uploadTarget && options.directUploadOverBytes !== undefined ? options.directUploadOverBytes : null;
   const live = new LiveRuns({ store: options.liveStore ?? writeBackend.store, now, timeoutMs: options.runTimeoutMs ?? 30_000, stalledMs: options.runStallMs ?? 900_000,
     onChange: run => {
       events.publish('run', run);
@@ -345,7 +371,9 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
       role: identity?.role ?? 'read', open: auth.open,
       write: options.write, ready: index.ready, viewers: events.count, time: now(),
       backends: snapshot.backends.map(({ id, label, available }) => ({ id, label, available, write: id === options.write })),
-      ...(({ backends: _unused, ...rest }) => rest)(index.stats()), capabilities: { events: true, ingest: true, store: true, checks: true, status: true, effective: true, live: true, tests: true, artifactTags: true, artifactSearch: true, reviewCollections: true, recordingVerification: true, catalogEntries: true, catalogQueue: true, catalogIndex: true }
+      ...(({ backends: _unused, ...rest }) => rest)(index.stats()),
+      uploads: { directOverBytes }, streamMaxSeconds: options.streamMaxMs ? Math.floor(options.streamMaxMs / 1000) : null,
+      capabilities: { events: true, ingest: true, store: true, checks: true, status: true, effective: true, live: true, tests: true, artifactTags: true, artifactSearch: true, reviewCollections: true, recordingVerification: true, catalogEntries: true, catalogQueue: true, catalogIndex: true }
     });
   });
 
@@ -353,7 +381,8 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
   const writeLive = async (c: Context, action: 'start' | 'update' | 'heartbeat') => {
     const verdict = auth.check(c.req.raw, 'publish');
     if (!verdict.ok) return unauthorized(verdict);
-    const owner = createHash('sha256').update(c.req.header('authorization') ?? 'open').digest('hex');
+    // A CI identity token is renewed every few minutes; the run belongs to the publisher it names, not to one token.
+    const owner = createHash('sha256').update(verdict.identity.via === 'oidc' ? `oidc:${verdict.identity.name}` : c.req.header('authorization') ?? 'open').digest('hex');
     const id = c.req.param('id')!;
     if (!/^[a-f0-9-]{36}$/.test(id)) return problemResponse(422, 'Invalid live run id.');
     try {
@@ -688,6 +717,7 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
   // Upload: the store protocol, and a simple JSON way in for anything that can make a request.
   app.route('/api/store', storeApi({
     store: writeBackend.store, auth, maxObjectBytes: limits.object,
+    ...(directOverBytes !== null ? { direct: { target: (key, upload) => uploadTarget!(key, upload) } } : {}),
     onStored: async (key, kind, layer) => {
       if (kind === 'layer-catalog') await index.accept(writeBackend.id, key, layer);
       else if (kind === 'spec-catalog') { await specs.invalidate(); events.publish('atlas:change', { scope: 'specs', files: [], runIds: [] }); }
@@ -832,6 +862,25 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
     return c.json({ error: 'Something went wrong on the server. It has been logged.' }, 500);
   });
 
+  // Without timers (serverless), each request looks at the store when the last look is stale. One look at a time; a
+  // failure keeps what is held, as a failed timed refresh does.
+  let lookedAt = now();
+  let looking: Promise<void> | null = null;
+  function lookAgainIfStale(): Promise<void> {
+    if (now() - lookedAt < options.refreshOnRequestMs!) return Promise.resolve();
+    looking ??= (async () => {
+      try {
+        await Promise.all([index.refresh(), live.sweep(), catalogQueue.active ? catalogQueue.sweep() : null]);
+      } catch (error) {
+        options.log?.({ level: 'error', refresh: 'on-request', error: String(error) });
+      } finally {
+        lookedAt = now();
+        looking = null;
+      }
+    })();
+    return looking;
+  }
+
   async function collect(policy: GcPolicy, run: { readonly dryRun: boolean; readonly project: string }): Promise<GcRun> {
     const base = { project: run.project, dryRun: run.dryRun };
     try {
@@ -848,7 +897,12 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
   }
 
   return {
-    fetch: async request => app.fetch(request),
+    // Without trusted publishers or serverless refresh, the request path is what it always was.
+    fetch: !options.trust && options.refreshOnRequestMs === undefined ? async request => app.fetch(request) : async request => {
+      await auth.prepare(request);
+      if (options.refreshOnRequestMs !== undefined) await lookAgainIfStale();
+      return app.fetch(request);
+    },
     routes: app.routes.map(({ method, path }) => ({ method, path })),
     index,
     events,

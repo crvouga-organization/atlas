@@ -14,6 +14,7 @@ import type { ObjectStore, PagedListing, StoredObject } from './object-store';
 import { ObjectStoreWithPrefix } from './store-prefix';
 import { ProjectSlugSchema } from '../../schema/src/project';
 import { isSignInPage, processHeaders, signInMessage } from './request-headers';
+import type { IdentitySource } from './ci-identity';
 
 /** How to reach a server: its `url`, the `token` to send (never in the URL), and, for tests and special runtimes, `fetch`, the retry count, the per-attempt timeout and `sleep`. */
 export type HttpStoreOptions = {
@@ -23,6 +24,11 @@ export type HttpStoreOptions = {
   readonly url: string;
   /** A publish or admin token to write with, a read token to read with. Never put it in the URL. */
   readonly token?: string;
+  /**
+   * Without a `token`: where to get a CI identity token for this server (trusted publishing). `openStore` gives one in
+   * GitHub Actions with `id-token: write`. A server that trusts the repository lets it publish with no secret.
+   */
+  readonly identity?: IdentitySource;
   /**
    * Extra headers for every request, for a server behind a platform's sign-in (`x-vercel-protection-bypass`, Cloudflare
    * Access service tokens). Default: `ATLAS_HEADERS` from the process environment (throws when it is malformed). Their
@@ -67,11 +73,13 @@ export type HttpStore = ObjectStore & PagedListing & {
 };
 
 const encode = (key: string) => key.split('/').map(encodeURIComponent).join('/');
+/** The keys that may go straight to storage: files (blobs and the files of a run), never what makes something visible. */
+const DIRECT_KEY = /^layers\/(blobs\/[0-9a-f]{64}\.gz|runs\/(?!index\/)[\w.-]+\/(?!manifest\.json$).+)$/;
 
 function explain(status: number, base: string, message: string | null): string {
   const said = message ? `: ${message}` : '';
   switch (status) {
-    case 401: return `${base} wants a token${said}. Set ATLAS_TOKEN (a publish token to upload, a read token to read).`;
+    case 401: return `${base} wants a token${said}. Set ATLAS_TOKEN (a publish token to upload, a read token to read), or publish from GitHub Actions with permissions: id-token: write from a repository the server trusts (ATLAS_TRUSTED_PUBLISHERS).`;
     case 403: return `${base} knows this token but it may not do that${said}. Uploading needs a publish or admin token.`;
     case 409: return `${base} refused a change to something that already exists${said}`;
     case 413: return `${base} refused an object that large${said}. Attach big files by uri, or raise the server's limits.maxObjectMiB.`;
@@ -94,12 +102,22 @@ export function httpStore(options: HttpStoreOptions): HttpStore {
   const retries = options.retries ?? 4;
   const timeoutMs = options.timeoutMs ?? 30_000;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
-  const authorization: Record<string, string> = options.token ? { authorization: `Bearer ${options.token}` } : {};
+  const fixed: Record<string, string> = options.token ? { authorization: `Bearer ${options.token}` } : {};
+  /** The token, or else a CI identity token that is renewed as it expires. */
+  const authorizationOf = async (): Promise<Record<string, string>> => {
+    if (options.token || !options.identity) return fixed;
+    try {
+      return { authorization: `Bearer ${await options.identity()}` };
+    } catch (error) {
+      throw new AtlasHttpError(`${base}: ${error instanceof Error ? error.message : String(error)}`, null);
+    }
+  };
   const extra = options.headers ?? processHeaders();
 
   async function request(method: string, url: string, init: { body?: Uint8Array; contentType?: string; allow404?: boolean; accept?: readonly number[]; headers?: Readonly<Record<string, string>>; json?: boolean } = {}): Promise<Response | null> {
     for (let attempt = 0; ; attempt++) {
       let failure: AtlasHttpError;
+      const authorization = await authorizationOf();
       try {
         // The clock is for the server to start answering; a large body may take longer to arrive.
         const controller = new AbortController();
@@ -128,6 +146,38 @@ export function httpStore(options: HttpStoreOptions): HttpStore {
     }
   }
 
+  // A server on a host that refuses large request bodies says how large a file may pass through it (`uploads.directOverBytes`).
+  // An older server says nothing, and everything goes through it as before.
+  let directOver: Promise<number | null> | undefined;
+  const directThreshold = () => directOver ??= request('GET', `${base}/api/server`, { json: true })
+    .then(async response => { const info = await response!.json() as { uploads?: { directOverBytes?: number | null } }; return typeof info.uploads?.directOverBytes === 'number' ? info.uploads.directOverBytes : null; })
+    .catch(() => null);
+
+  /** Send a large file straight to storage when the server offers it. False: send it through the server instead. */
+  async function putDirect(key: string, bytes: Uint8Array, contentType: string): Promise<boolean> {
+    if (!DIRECT_KEY.test(key)) return false;
+    const over = await directThreshold();
+    if (over === null || bytes.length <= over) return false;
+    const url = `${root}/${encode(key)}`;
+    const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+    const started = await request('POST', `${url}?upload=start`, { body: json({ size: bytes.length, contentType }), contentType: 'application/json', json: true, accept: [404, 422] });
+    if (!started || started.status === 404 || started.status === 422) { await started?.body?.cancel(); return false; }
+    const target = await started.json() as { exists?: boolean; method?: string; url?: string; headers?: Record<string, string> };
+    if (target.exists) return true;
+    if (!target.url || target.method !== 'PUT') throw new AtlasHttpError(`${base} offered an upload target it did not describe`, started.status);
+    // Straight to storage: only the target's own short-lived headers go there, never the Atlas token or ATLAS_HEADERS.
+    for (let attempt = 0; ; attempt++) {
+      const sent = await doFetch(target.url, { method: 'PUT', headers: target.headers ?? {}, body: bytes as BodyInit }).catch((error: Error) => error);
+      if (!(sent instanceof Error) && sent.ok) { await sent.body?.cancel(); break; }
+      const status = sent instanceof Error ? null : sent.status;
+      if (!(sent instanceof Error)) await sent.body?.cancel();
+      if (attempt >= retries || (status !== null && status < 500 && status !== 429)) throw new AtlasHttpError(`storage refused ${key} sent straight to it (${status ?? (sent as Error).message})`, status, false);
+      await sleep(Math.random() * Math.min(8_000, 100 * 2 ** attempt));
+    }
+    await (await request('POST', `${url}?upload=complete`))?.arrayBuffer();
+    return true;
+  }
+
   const store: HttpStore = {
     forProject: project => httpStore({ ...options, headers: extra, project }),
     label: base,
@@ -140,6 +190,7 @@ export function httpStore(options: HttpStoreOptions): HttpStore {
       return { body: response.body ?? new Blob([]).stream(), contentType: response.headers.get('content-type') ?? 'application/octet-stream', size: Number(response.headers.get('content-length') ?? 0) };
     },
     async put(key, bytes, contentType) {
+      if (await putDirect(key, bytes, contentType)) return;
       await (await request('PUT', `${root}/${encode(key)}`, { body: bytes, contentType }))?.arrayBuffer();
     },
     async head(key) {

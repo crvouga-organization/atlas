@@ -2812,6 +2812,142 @@
           }
         }
       },
+      "post": {
+        "operationId": "directUpload",
+        "tags": [
+          "Store protocol"
+        ],
+        "summary": "Send a large file straight to storage",
+        "description": "For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.\n\n1. `POST /api/store/<key>?upload=start` with `{ \"size\": <bytes>, \"contentType\": \"…\" }`. The answer is `{ \"exists\": true }` for a blob already stored (send nothing), or `{ \"exists\": false, \"method\": \"PUT\", \"url\": …, \"headers\": …, \"expiresAt\": … }`: a request good for this one key, size and type for a few minutes.\n2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).\n3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.\n\nOnly files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.\n\nRole needed: `publish`.",
+        "x-atlas-role": "publish",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "required": true,
+            "name": "key",
+            "in": "path",
+            "description": "An object key under `layers/`, such as `layers/manifests/<id>.json`. It contains slashes, which are not percent-encoded; every other character is.",
+            "example": "layers/index/9007199254740985-0f3a….json",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "upload",
+            "in": "query",
+            "description": "`start` or `complete`.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "start",
+                "complete"
+              ]
+            }
+          },
+          {
+            "required": false,
+            "name": "project",
+            "in": "query",
+            "description": "Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.",
+            "example": "todo-app",
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$",
+              "maxLength": 64
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "For `start`: the size in bytes and the content type.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "size": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "contentType": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`start`: where to send the bytes, or that the blob is already there."
+          },
+          "201": {
+            "description": "`complete`: checked and accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoreWriteResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one. Send `Authorization: Bearer <token>`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is known but its role may not do this.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "This server takes uploads only through `PUT`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Over `limits.maxObjectMiB`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not a file key, nothing arrived, or what arrived is not what its name says (and was deleted).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "operationId": "deleteObject",
         "tags": [
@@ -3148,6 +3284,142 @@
           },
           "422": {
             "description": "Not a key Atlas writes, or the content is not what its name says.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "directUploadForProject",
+        "tags": [
+          "Store protocol"
+        ],
+        "summary": "Send a large file straight to storage",
+        "description": "For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.\n\n1. `POST /api/store/<key>?upload=start` with `{ \"size\": <bytes>, \"contentType\": \"…\" }`. The answer is `{ \"exists\": true }` for a blob already stored (send nothing), or `{ \"exists\": false, \"method\": \"PUT\", \"url\": …, \"headers\": …, \"expiresAt\": … }`: a request good for this one key, size and type for a few minutes.\n2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).\n3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.\n\nOnly files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.\n\nScoped to one project. The same project may be selected on the unprefixed API using ?project= or X-Atlas-Project. Unknown projects return 404 on reads and are created by an authenticated upload.\n\nRole needed: `publish`.",
+        "x-atlas-role": "publish",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "required": true,
+            "name": "project",
+            "in": "path",
+            "description": "Project slug. Alternatively send X-Atlas-Project or use the project-prefixed route. Omit for the default project. Conflicting selectors are refused.",
+            "example": "todo-app",
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$",
+              "maxLength": 64
+            }
+          },
+          {
+            "required": true,
+            "name": "key",
+            "in": "path",
+            "description": "An object key under `layers/`, such as `layers/manifests/<id>.json`. It contains slashes, which are not percent-encoded; every other character is.",
+            "example": "layers/index/9007199254740985-0f3a….json",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "upload",
+            "in": "query",
+            "description": "`start` or `complete`.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "start",
+                "complete"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "For `start`: the size in bytes and the content type.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "size": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "contentType": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`start`: where to send the bytes, or that the blob is already there."
+          },
+          "201": {
+            "description": "`complete`: checked and accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoreWriteResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, or an unknown one. Send `Authorization: Bearer <token>`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is known but its role may not do this.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "This server takes uploads only through `PUT`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Over `limits.maxObjectMiB`.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not a file key, nothing arrived, or what arrived is not what its name says (and was deleted).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -14298,6 +14570,42 @@
               "type": "boolean"
             },
             "description": "Features this server has, by name: `events`, `ingest`, `store`, `checks`, `status`, `effective`. A client checks a name before using what it names"
+          },
+          "uploads": {
+            "description": "How this server takes uploads. Absent from a server that predates it: every upload goes through it",
+            "type": "object",
+            "properties": {
+              "directOverBytes": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Files larger than this go straight to storage (`POST /api/store/<key>?upload=start`, then `?upload=complete`); null when every upload goes through the server"
+              }
+            },
+            "required": [
+              "directOverBytes"
+            ],
+            "additionalProperties": {}
+          },
+          "streamMaxSeconds": {
+            "description": "The longest one /api/events stream lasts before the server ends it and the viewer reconnects; null or absent when streams last until the viewer leaves",
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [

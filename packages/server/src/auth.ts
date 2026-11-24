@@ -4,13 +4,16 @@
  * Who is asking, and may they. Tokens have a role (`read` < `critic` < `publish` < `admin`) and are compared in constant time. Reading
  * accepts a Bearer token or the browser's sign-in box (any user name, the token as the password); changing anything needs
  * the Bearer header, because a browser sends the sign-in box's credentials to any page that asks, which would let another
- * site upload with them. A server with no tokens is open, and refuses to listen beyond this machine unless told it may.
+ * site upload with them. A CI job may also present an OIDC identity token of a trusted publisher (`trusted-publishing.ts`),
+ * which may publish and nothing more. A server with no tokens and no trusted publishers is open, and refuses to listen
+ * beyond this machine unless told it may.
  */
 
 import { timingSafeEqual } from 'node:crypto';
 
 import type { ServerRole } from '../../schema/src/server-config';
 import type { ResolvedToken } from './config';
+import type { TrustedPublishers } from './trusted-publishing';
 
 const RANK: Readonly<Record<ServerRole, number>> = { read: 1, critic: 2, publish: 3, admin: 4 };
 
@@ -18,8 +21,8 @@ const RANK: Readonly<Record<ServerRole, number>> = { read: 1, critic: 2, publish
 export type Identity = {
   readonly name: string;
   readonly role: ServerRole;
-  /** `bearer` for a token in a header, `basic` for the browser's sign-in box, `none` for a server with no tokens. */
-  readonly via: 'bearer' | 'basic' | 'none';
+  /** `bearer` for a token in a header, `basic` for the browser's sign-in box, `oidc` for a trusted publisher's identity token, `none` for a server with no tokens. */
+  readonly via: 'bearer' | 'basic' | 'oidc' | 'none';
 };
 
 /** The answer to "may this request do that": allowed with the identity, or refused with the status to answer (`401` no or unknown token, `403` a known token that may not) and a message that says what to do. */
@@ -40,9 +43,10 @@ function same(a: string, b: string): boolean {
  * browser sends that box's credentials on its own to any page that asks, which would let another site upload
  * with them.
  */
-export function createAuth(tokens: readonly ResolvedToken[], anonymousRead: boolean) {
+export function createAuth(tokens: readonly ResolvedToken[], anonymousRead: boolean, trust?: TrustedPublishers) {
+  const open = tokens.length === 0 && !trust?.enabled;
   function identify(request: Request): Identity | null {
-    if (!tokens.length) return { name: 'open', role: 'admin', via: 'none' };
+    if (open) return { name: 'open', role: 'admin', via: 'none' };
     const header = request.headers.get('authorization') ?? '';
     const lower = header.toLowerCase();
     let presented: string | null = null;
@@ -56,6 +60,9 @@ export function createAuth(tokens: readonly ResolvedToken[], anonymousRead: bool
     if (presented) {
       const found = tokens.find(token => same(token.token, presented!));
       if (found) return { name: found.name, role: found.role, via };
+      // Verified by `prepare` before the request reached here; a token that did not verify is no one.
+      const publisher = via === 'bearer' ? trust?.identityOf(presented) : null;
+      if (publisher) return { name: publisher.name, role: 'publish', via: 'oidc' };
     }
     return anonymousRead ? { name: 'anonymous', role: 'read', via: 'none' } : null;
   }
@@ -70,7 +77,10 @@ export function createAuth(tokens: readonly ResolvedToken[], anonymousRead: bool
     return { ok: true, identity };
   }
 
-  return { identify, check, open: tokens.length === 0 };
+  /** Verify a trusted publisher's identity token, if the request carries one, so `identify` and `check` know it. Call before them. */
+  const prepare = (request: Request): Promise<void> => trust ? trust.prepare(request, value => tokens.some(token => same(token.token, value))) : Promise.resolve();
+
+  return { identify, check, prepare, open };
 }
 
 /** The authentication of one server: `identify` (who is this), `check` (may they, for a needed role) and `open` (the server has no tokens). */

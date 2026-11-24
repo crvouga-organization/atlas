@@ -1181,6 +1181,52 @@ Group order: for `status`, failed, running, skipped, passed; otherwise alphabeti
 label for an empty file, package or runtime) last. With `none` there is a single group named `All`. When
 nothing matches, no group is returned.
 
+### CI identity tokens (trusted publishing, client side)
+
+Source: `packages/reports/src/ci-identity.ts`. Import: `@crvouga/atlas/reports/ci-identity`
+
+In GitHub Actions with `permissions: id-token: write`, a job can ask GitHub for a short-lived OIDC token that says which
+repository, branch and workflow it is. An Atlas server that trusts the repository accepts that token instead of a publish
+token, so CI publishes with no secret at all. `ciIdentity` returns a source of such tokens, addressed to one server (the
+token's audience is the server's origin, so it is useless anywhere else) and renewed shortly before each expires; it
+returns `null` outside a CI that offers one. A token is never printed.
+
+See docs/server.md#trusted-publishing
+
+#### `IdentitySource`
+
+```ts
+export type IdentitySource = { (): Promise<string>; /** Where the tokens come from, for people: `GitHub Actions OIDC`. */ readonly label: string };
+```
+
+A source of identity tokens for one server: the current one, fetched or renewed when needed.
+
+#### `ciIdentity`
+
+```ts
+export function ciIdentity(serverUrl: string, env: Env, options: { readonly fetch?: typeof fetch; readonly now?: () => number } = {}): IdentitySource | null
+```
+
+Identity tokens addressed to `serverUrl` from the CI this runs in, or `null` when it offers none (not in GitHub Actions,
+or the workflow did not grant `id-token: write`). The source throws when GitHub refuses to mint one.
+
+**Example**
+
+```ts
+const identity = ciIdentity('https://atlas.example.com', process.env);
+const bearer = identity ? await identity() : process.env.ATLAS_TOKEN;
+```
+
+#### `bearerFor`
+
+```ts
+export async function bearerFor(serverUrl: string, token: string | undefined, env: Env = typeof process === 'undefined' ? {} : process.env): Promise<string | undefined>
+```
+
+What to send as the bearer to an Atlas server: the given token when there is one, else a CI identity token for
+`serverUrl` when the CI offers one, else nothing. For clients that make their own requests (the live reporter, the
+runner upload); `httpStore` takes the source itself.
+
 ### Stores named on a command line
 
 Source: `packages/reports/src/cli-stores.ts`. Import: `@crvouga/atlas/reports/cli-stores`
@@ -3852,6 +3898,11 @@ export type HttpStoreOptions = {
   readonly url: string;
   /** A publish or admin token to write with, a read token to read with. Never put it in the URL. */
   readonly token?: string;
+  /**
+   * Without a `token`: where to get a CI identity token for this server (trusted publishing). `openStore` gives one in
+   * GitHub Actions with `id-token: write`. A server that trusts the repository lets it publish with no secret.
+   */
+  readonly identity?: IdentitySource;
   /**
    * Extra headers for every request, for a server behind a platform's sign-in (`x-vercel-protection-bypass`, Cloudflare
    * Access service tokens). Default: `ATLAS_HEADERS` from the process environment (throws when it is malformed). Their
@@ -13876,6 +13927,11 @@ says whether trying again can help; the store already retried before throwing.
 export type VercelBlobStore = ObjectStore & PagedListing & {
   /** A description with no secrets: `vercel-blob://my-project/ (store abc123)`. */
   readonly label: string;
+  /**
+   * A request someone else may make to write exactly this key, this size and this type, for a short while, without the
+   * store's token: a client token signed with it. For files too large to pass through a serverless function.
+   */
+  uploadTarget(key: string, upload: { readonly size: number; readonly contentType: string; readonly validForMs?: number }): Promise<{ readonly method: 'PUT'; readonly url: string; readonly headers: Readonly<Record<string, string>>; readonly expiresAt: string }>;
   /** One cheap round trip: can this store be listed with this token? Used by `atlas report doctor`. */
   ping(): Promise<{ readonly ok: boolean; readonly ms: number; readonly error?: string }>;
 };
