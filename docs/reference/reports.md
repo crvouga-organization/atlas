@@ -633,6 +633,46 @@ const redirect = await storeRedirect(request, store, `layers/runs/${id}/clip.web
 if (redirect) return redirect;
 ```
 
+### attachment-retention.ts
+
+Source: `packages/reports/src/attachment-retention.ts`. Import: `@crvouga/atlas/reports/attachment-retention`
+
+@module Attachment retention
+Expiry receipts identify captured files in a superseded layer while preserving its content-addressed manifest.
+Bundle chunks can hold several files. A chunk is reclaimable only after every retained layer and file releases it.
+
+#### `expiryPrefix`
+
+```ts
+export const expiryPrefix = …
+```
+
+Private object keys for a layer’s expired attachment receipts.
+
+#### `expiredFiles`
+
+```ts
+export async function expiredFiles(store: ObjectStore, id: string): Promise<string[]>
+```
+
+Bundle keys already marked expired. An unreadable receipt listing fails the read.
+
+#### `expirableFiles`
+
+```ts
+export function expirableFiles(layer: ReportLayer, policy: NonNullable<GcPolicy['attachments']>, nowMs: number, defaultBranch?: string): string[]
+```
+
+Which content-addressed attachment files may expire under the policy. Any protected reference keeps the file.
+
+#### `withoutExpiredFiles`
+
+```ts
+export function withoutExpiredFiles(layer: ReportLayer, keys: readonly string[]): ReportLayer
+```
+
+A presentation copy with expired files replaced by a note at the same check, step, attempt, part or layer.
+
 ### AWS credential lookup
 
 Source: `packages/reports/src/aws-credentials.ts`. Import: `@crvouga/atlas/reports/aws-credentials`
@@ -3719,6 +3759,8 @@ export type GcPlan = {
   readonly kept: number;
   /** The ids of the layers that stay, when `planGarbage` made the plan: what a pass reads to keep the blobs they use. */
   readonly remaining?: readonly string[];
+  /** Retained superseded layers to inspect for earlier evidence expiry. */
+  readonly expiry?: { readonly ids: readonly string[]; readonly defaultBranch?: string; readonly policy: NonNullable<GcPolicy['attachments']>; readonly nowMs: number };
 };
 ```
 
@@ -3727,7 +3769,7 @@ What a policy would delete from a store right now.
 #### `GcOutcome`
 
 ```ts
-export type GcOutcome = { readonly deletedLayers: number; readonly deletedBlobs: number; readonly candidateBlobs?: number; readonly candidateBytes?: number; readonly deletedBytes?: number };
+export type GcOutcome = { readonly strippedLayers?: number; readonly deletedLayers: number; readonly deletedBlobs: number; readonly candidateBlobs?: number; readonly candidateBytes?: number; readonly deletedBytes?: number };
 ```
 
 The outcome of applying a plan. `candidateBlobs` and `candidateBytes` are what the pass found to delete (the blobs only
@@ -3737,12 +3779,12 @@ real one; `deletedBytes` is what a real pass removed (0 for a dry run).
 #### `planGarbage`
 
 ```ts
-export async function planGarbage(store: ObjectStore, input: { readonly policy: GcPolicy; readonly nowMs: number; readonly eligible: ReadonlySet<string> }): Promise<GcPlan>
+export async function planGarbage(store: ObjectStore, input: { readonly defaultBranch?: string; readonly policy: GcPolicy; readonly nowMs: number; readonly eligible: ReadonlySet<string> }): Promise<GcPlan>
 ```
 
 Decides which layers a policy deletes, without deleting anything. `eligible` is the set of layer ids the caller has
 read and knows no longer decide any result (`ReportIndex.superseded()`); a layer not in it is never a candidate.
-Lists the catalog only. With `policy.enabled === false` the plan is empty.
+A byte budget also measures stored objects and references. With `policy.enabled === false` the plan is empty.
 
 **Example**
 
@@ -5603,7 +5645,7 @@ Transport and batching configuration. Defaults: 250 ms batches, 5 s heartbeats a
 #### `LiveReporter`
 
 ```ts
-export type LiveReporter = { readonly id: string; readonly finishedAtMs?: number; check(check: LiveCheck): void; flush(): Promise<void>; finish(status?: 'completed' | 'interrupted', reason?: string): Promise<void> };
+export type LiveReporter = { readonly id: string; compact?(layer: string): Promise<void>; readonly finishedAtMs?: number; check(check: LiveCheck): void; flush(): Promise<void>; finish(status?: 'completed' | 'interrupted', reason?: string): Promise<void> };
 ```
 
 Producer handle. check never throws transport errors into a test; finish flushes and rejects if publication failed.
@@ -7697,6 +7739,7 @@ It reads only immutable layers (`layers/index/…`), which is what makes "read o
 - `changedSince(since: string): ReadonlySet<string> | null` — The ids of the layers that were added or changed (took a slot, or lost one) since the report a reader holds, named by its version: what `delta` sends, without the text. `null` when that version is not remembered, and the reader should take everything. Used to answer "what changed" about a view of the report, such as the entries of the UI catalog.
 - `get history(): TestHistory { return this.#history; }` — Every recorded result of every test and every run, as layers were folded in: what the test catalog, a test's history and the run list are built from. Read-only for callers; `history.rev` changes whenever a layer is taken in.
 - `superseded(): ReadonlySet<string>` — The ids of layers this index has read and that no longer decide any result. Removing one from its store cannot change the report (every slot it filled is held by a newer layer), which is what makes it safe for garbage collection to delete. A layer that failed to load, is hidden by `include`, or still holds a result is not here.
+- `async forgetLiveProgress(runId: string, ids: ReadonlySet<string>): Promise<void>` — Drop history and counts for live layers confirmed superseded and compacted in this single backend.
 - `stats()` — For `/readyz` and logs.
 
 ### Test loading state
@@ -10249,6 +10292,29 @@ The worst outcome of a set of tests or sources: `failed` if any failed, `skipped
 were skipped, otherwise `passed`. An empty list is `passed`: callers that need "no evidence" to mean something else
 (for example `closeCommit`) check for emptiness themselves.
 
+### storage-usage.ts
+
+Source: `packages/reports/src/storage-usage.ts`. Import: `@crvouga/atlas/reports/storage-usage`
+
+@module Project storage usage
+Counts physical objects and bytes in one project. Shared blobs count once in the total and once in each group that uses them.
+
+#### `projectObjectSizes`
+
+```ts
+export async function projectObjectSizes(store: ObjectStore): Promise<Map<string, number>>
+```
+
+Physical sizes of objects in one project, excluding child projects and the collector’s temporary work.
+
+#### `projectStorage`
+
+```ts
+export async function projectStorage(store: ObjectStore)
+```
+
+Measure project storage and attribute layer documents and captured files by producer, branch and attachment role.
+
 ### Prefix-scoped object store
 
 Source: `packages/reports/src/store-prefix.ts`. Import: `@crvouga/atlas/reports/store-prefix`
@@ -10664,6 +10730,9 @@ A group in the summary (an environment, a producer, a domain, a spec): how many 
 
 ```ts
 export type CatalogSummary = {
+  /** Navigation destinations represented by the current report. */
+  readonly hasUiCatalog?: boolean;
+  readonly hasCritiques?: boolean;
   readonly tests: number;
   /** Tests by their current status. */
   readonly counts: StatusCounts;
@@ -10740,6 +10809,10 @@ One of `TEST_SORTS`. `spec` (the default) orders by domain, spec and title.
 
 ```ts
 export type TestQuery = {
+  /** Require a playable recording in a current result. */
+  readonly video?: boolean;
+  /** Return exact filter counts before pagination. */
+  readonly counts?: boolean;
   /** Words that must all appear in the title, id, spec, domain, tags, labels, environments or producers. Case does not matter. */
   readonly q?: string;
   /** Current status, or `flaky`. */
@@ -10759,6 +10832,8 @@ export type TestQuery = {
   /** Only tests recorded in this run (a key from `runList`). */
   readonly run?: string;
   readonly sort?: TestSort;
+  /** Continue after this test key in the filtered sort order. */
+  readonly cursor?: string;
   readonly offset?: number;
   /** At most this many tests (default 500, at most 20000). */
   readonly limit?: number;
@@ -10771,6 +10846,10 @@ Which tests to list. Every field is optional; several values of one field match 
 
 ```ts
 export type TestCatalog = {
+  /** Counts for the current filters with the counted dimension omitted, before pagination. */
+  /** Last test key on this page when another page follows. */
+  readonly nextCursor?: string;
+  readonly filterCounts?: { status: Record<string, number>; environment: Record<string, number>; video: number };
   readonly schemaVersion: typeof TEST_CATALOG_VERSION;
   /** Changes whenever the report or its history does. */
   readonly version: string;
@@ -11045,6 +11124,7 @@ const catalog = testCatalog(catalogModel(layers, { history }));
 - `tests(): readonly { readonly key: string; readonly id: string; readonly specPath: string | null }[]` — Every test the history holds a result for (keyed as `TestSummary.key`), including tests the report no longer has a current result for.
 - `get layers(): number { return this.#seen.size; }` — How many layers were added.
 - `add(layer: LayerHeader, rows: readonly LayerRow[], specs: readonly SpecEntry[] = [], backend = layer.backend, fingerprints: Readonly<Record<string, string>> = {}): void` — Takes in one layer: its header, its rows, the specs it recorded and the backend it was read from. A layer id already added is ignored. `fingerprints` (spec path to the fingerprint the layer recorded, as `LayerRows.fingerprints`) gives each result its `specRevision`; without it no result has one.
+- `async forgetProgress(runId: string, ids: ReadonlySet<string>, read: (id: string) => Promise<LayerEvidence>): Promise<void>` — Forget superseded live progress from an invocation after its final layer has been stored.
 - `of(key: string): readonly TestResultEntry[]` — The recorded results of one test (by `TestSummary.key`), newest first. Empty when none.
 - `get runCount(): number { return this.#runs.size; }` — How many runs it knows of.
 - `runs(): RunSummary[]` — Every run, newest first.

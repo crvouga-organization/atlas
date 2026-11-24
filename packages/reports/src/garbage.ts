@@ -18,6 +18,9 @@
  *
  * @see docs/server.md#user-state-and-garbage-collection
  */
+import { projectObjectSizes } from './storage-usage';
+import { expiredFiles, expirableFiles, expiryPrefix } from './attachment-retention';
+import type { ReportLayer } from './layer-types';
 import { eachLimited } from './completion-order';
 import { LAYER_INDEX, layerKey } from './layer-store';
 import { readBytes, readUtf8, writeUtf8 } from './object-io';
@@ -39,6 +42,8 @@ export type GcPlan = {
   readonly kept: number;
   /** The ids of the layers that stay, when `planGarbage` made the plan: what a pass reads to keep the blobs they use. */
   readonly remaining?: readonly string[];
+  /** Retained superseded layers to inspect for earlier evidence expiry. */
+  readonly expiry?: { readonly ids: readonly string[]; readonly defaultBranch?: string; readonly policy: NonNullable<GcPolicy['attachments']>; readonly nowMs: number };
 };
 
 /**
@@ -46,17 +51,17 @@ export type GcPlan = {
  * the deleted layers used, and the bytes of those blobs and of the layers' manifests), the same for a dry run as for a
  * real one; `deletedBytes` is what a real pass removed (0 for a dry run).
  */
-export type GcOutcome = { readonly deletedLayers: number; readonly deletedBlobs: number; readonly candidateBlobs?: number; readonly candidateBytes?: number; readonly deletedBytes?: number };
+export type GcOutcome = { readonly strippedLayers?: number; readonly deletedLayers: number; readonly deletedBlobs: number; readonly candidateBlobs?: number; readonly candidateBytes?: number; readonly deletedBytes?: number };
 
 /**
  * Decides which layers a policy deletes, without deleting anything. `eligible` is the set of layer ids the caller has
  * read and knows no longer decide any result (`ReportIndex.superseded()`); a layer not in it is never a candidate.
- * Lists the catalog only. With `policy.enabled === false` the plan is empty.
+ * A byte budget also measures stored objects and references. With `policy.enabled === false` the plan is empty.
  *
  * @example
  * const plan = await planGarbage(store, { policy, nowMs: Date.now(), eligible: index.superseded() });
  */
-export async function planGarbage(store: ObjectStore, input: { readonly policy: GcPolicy; readonly nowMs: number; readonly eligible: ReadonlySet<string> }): Promise<GcPlan> {
+export async function planGarbage(store: ObjectStore, input: { readonly defaultBranch?: string; readonly policy: GcPolicy; readonly nowMs: number; readonly eligible: ReadonlySet<string> }): Promise<GcPlan> {
   const entries = (await store.listKeys(LAYER_INDEX)).flatMap(key => {
     const match = CATALOG.exec(key);
     return match ? [{ id: match[2]!, catalogKey: key, recordedAtMs: Number.MAX_SAFE_INTEGER - Number(match[1]) }] : [];
@@ -66,8 +71,41 @@ export async function planGarbage(store: ObjectStore, input: { readonly policy: 
   if (!input.policy.enabled) return { candidates: [], kept: entries.length, remaining: entries.map(entry => entry.id) };
   const cutoff = input.nowMs - input.policy.maxAgeDays * DAY_MS;
   const candidates = entries.slice(input.policy.keepLatest).filter(entry => entry.recordedAtMs < cutoff && input.eligible.has(entry.id));
+  if (input.policy.maxBytes !== undefined) {
+    const value = input.policy.maxBytes;
+    const units: Record<string, number> = { KB: 1e3, MB: 1e6, GB: 1e9, TB: 1e12 };
+    const budget = typeof value === 'number' ? value : parseInt(value, 10) * units[value.slice(-2).toUpperCase()]!;
+    const sizes = await projectObjectSizes(store);
+    let projected = [...sizes.values()].reduce((sum, size) => sum + size, 0);
+    if (projected > budget) {
+      const files = new Map<string, string[]>(), uses = new Map<string, number>();
+      let unknown = false;
+      await eachLimited(entries, 16, async entry => {
+        const layer = await readSizedLayer(store, entry.id);
+        if (!layer) { unknown = true; return; }
+        files.set(entry.id, layer.blobs);
+        for (const blob of layer.blobs) uses.set(blob, (uses.get(blob) ?? 0) + 1);
+      });
+      const aged = new Set(candidates.map(entry => entry.id));
+      for (const entry of entries.slice(input.policy.keepLatest).reverse()) {
+        if (!input.eligible.has(entry.id) || !files.has(entry.id)) continue;
+        if (!aged.has(entry.id)) {
+          if (projected <= budget) break;
+          candidates.push(entry);
+        }
+        projected -= (sizes.get(entry.catalogKey) ?? 0) + (sizes.get(layerKey(entry.id)) ?? 0);
+        for (const blob of files.get(entry.id)!) {
+          const count = uses.get(blob)! - 1;
+          uses.set(blob, count);
+          if (!count && !unknown) projected -= sizes.get(blob) ?? 0;
+        }
+      }
+      candidates.sort((a, b) => b.recordedAtMs - a.recordedAtMs || a.catalogKey.localeCompare(b.catalogKey));
+    }
+  }
   const doomed = new Set(candidates.map(candidate => candidate.id));
-  return { candidates: candidates.reverse(), kept: entries.length - candidates.length, remaining: entries.filter(entry => !doomed.has(entry.id)).map(entry => entry.id) };
+  const expiry = input.policy.attachments && { ...(input.defaultBranch ? { defaultBranch: input.defaultBranch } : {}), policy: input.policy.attachments, nowMs: input.nowMs, ids: entries.filter(entry => !doomed.has(entry.id) && input.eligible.has(entry.id)).map(entry => entry.id) };
+  return { ...(expiry?.ids.length ? { expiry } : {}), candidates: candidates.reverse(), kept: entries.length - candidates.length, remaining: entries.filter(entry => !doomed.has(entry.id)).map(entry => entry.id) };
 }
 
 /**
@@ -132,14 +170,14 @@ export type GcStepOptions = {
 
 type StepState = { phase: GcStep['phase']; offset: number };
 type LayerBatch = { ids: string[]; blobs: string[]; bytes: number; unreadable: boolean };
-type UsedBatch = { blobs: string[]; unreadable: boolean };
-type Orphans = { blobs: string[]; considered: string[]; unreadable: boolean };
+type UsedBatch = { blobs: string[]; unreadable: boolean; expired?: string[]; receipts?: { id: string; keys: string[] }[] };
+type Orphans = { strippedLayers?: number; blobs: string[]; considered: string[]; unreadable: boolean };
 type BlobBatch = { count: number; bytes: number };
 
 const decoder = new TextDecoder();
 
 /** The blobs a layer's manifest names and the manifest's size in bytes, or null when it is missing or unreadable. */
-async function readSizedLayer(store: ObjectStore, id: string): Promise<{ blobs: string[]; bytes: number } | null> {
+async function readSizedLayer(store: ObjectStore, id: string): Promise<{ blobs: string[]; bytes: number; layer: ReportLayer } | null> {
   try {
     const stored = await store.get(layerKey(id));
     if (!stored) return null;
@@ -147,7 +185,7 @@ async function readSizedLayer(store: ObjectStore, id: string): Promise<{ blobs: 
     const parsed = parseLayerDocument(JSON.parse(decoder.decode(bytes)));
     if (!parsed.ok) return null;
     const bundle = (parsed.layer as unknown as { bundle: Record<string, { parts: { blob: string }[] }> }).bundle;
-    return { blobs: [...new Set(Object.values(bundle).flatMap(file => file.parts.map(part => part.blob)))], bytes: bytes.length };
+    return { layer: parsed.layer as unknown as ReportLayer, blobs: [...new Set(Object.values(bundle).flatMap(file => file.parts.map(part => part.blob)))], bytes: bytes.length };
   } catch {
     return null;
   }
@@ -185,9 +223,10 @@ export async function stepGarbage(store: ObjectStore, scratch: GcScratch, plan: 
   const deadline = options.deadline ?? Number.POSITIVE_INFINITY;
   const size = Math.max(1, options.batch ?? 50);
   const remaining = plan.remaining ?? [];
+  const inspectExpiry = new Set(plan.expiry?.ids);
   const layerBatches = Math.ceil(plan.candidates.length / size);
   const scanBatches = Math.ceil(remaining.length / size);
-  let state = (await scratch.read<StepState>('state.json')) ?? { phase: plan.candidates.length ? 'layers' : 'done', offset: 0 };
+  let state = (await scratch.read<StepState>('state.json')) ?? { phase: plan.candidates.length ? 'layers' : inspectExpiry.size ? 'scan' : 'done', offset: 0 };
   const save = async (next: StepState) => { state = next; await scratch.write('state.json', next); };
 
   const progress = async (): Promise<GcStep> => {
@@ -204,6 +243,7 @@ export async function stepGarbage(store: ObjectStore, scratch: GcScratch, plan: 
       done: state.phase === 'done', phase: state.phase, candidates: plan.candidates.length,
       layersExamined: state.phase === 'layers' ? Math.min(plan.candidates.length, state.offset * size) : plan.candidates.length,
       layersScanned: state.phase === 'scan' ? Math.min(remaining.length, state.offset * size) : state.phase === 'layers' ? 0 : remaining.length,
+      ...(plan.expiry ? { strippedLayers: orphans?.strippedLayers ?? 0 } : {}),
       unreadable: layers.some(batch => batch.unreadable) || (orphans?.unreadable ?? false),
       deletedLayers: dryRun ? 0 : examined, deletedBlobs: dryRun ? 0 : blobCount,
       candidateBlobs: orphans?.blobs.length ?? 0, candidateBytes: bytes, deletedBytes: dryRun ? 0 : bytes
@@ -240,6 +280,10 @@ export async function stepGarbage(store: ObjectStore, scratch: GcScratch, plan: 
         // The catalog entry first: nothing visible ever points at a missing manifest.
         await store.deleteMany(batch.filter(candidate => ids.has(candidate.id)).map(candidate => candidate.catalogKey));
         await store.deleteMany(found.ids.map(id => layerKey(id)));
+        await eachLimited(found.ids, 16, async id => {
+          const receipts = await store.listKeys(expiryPrefix(id));
+          if (receipts.length) await store.deleteMany(receipts);
+        });
       }
       await save({ phase: 'layers', offset: state.offset + 1 });
       worked = true;
@@ -248,16 +292,34 @@ export async function stepGarbage(store: ObjectStore, scratch: GcScratch, plan: 
     }
     if (state.phase === 'scan') {
       if (state.offset >= scanBatches) { await save({ phase: 'blobs', offset: 0 }); continue; }
-      if (!(await scratch.read<UsedBatch>(`used-${state.offset}.json`))) {
+      const scanKey = `used-${state.offset}.json`;
+      let used = await scratch.read<UsedBatch>(scanKey);
+      if (!used) {
+        const expired = new Set<string>();
+        const receipts: { id: string; keys: string[] }[] = [];
         const blobs = new Set<string>();
         let unreadable = false;
         await eachLimited(chunk(remaining, size, state.offset), 16, async id => {
           const layer = await readSizedLayer(store, id);
           if (!layer) { unreadable = true; return; }
-          for (const blob of layer.blobs) blobs.add(blob);
+          if (!inspectExpiry.has(id) || !plan.expiry) {
+            for (const blob of layer.blobs) blobs.add(blob);
+            return;
+          }
+          const previous = new Set(await expiredFiles(store, id));
+          const keys = expirableFiles(layer.layer, plan.expiry.policy, plan.expiry.nowMs, plan.expiry.defaultBranch).filter(key => !previous.has(key));
+          const omit = new Set([...previous, ...keys]);
+          if (keys.length) receipts.push({ id, keys });
+          for (const [key, file] of Object.entries(layer.layer.bundle)) {
+            for (const part of file.parts) (omit.has(key) ? expired : blobs).add(part.blob);
+          }
         });
-        await scratch.write(`used-${state.offset}.json`, { blobs: [...blobs].sort(), unreadable } satisfies UsedBatch);
+        used = { blobs: [...blobs].sort(), unreadable, expired: [...expired], receipts };
+        await scratch.write(scanKey, used);
       }
+      if (!dryRun) await eachLimited(used.receipts ?? [], 16, async receipt => {
+        for (const key of receipt.keys) await store.put(expiryPrefix(receipt.id) + key, new Uint8Array(), 'application/octet-stream');
+      });
       await save({ phase: 'scan', offset: state.offset + 1 });
       worked = true;
       await tell();
@@ -275,13 +337,19 @@ export async function stepGarbage(store: ObjectStore, scratch: GcScratch, plan: 
         unreadable ||= batch.unreadable;
         for (const blob of batch.blobs) doomed.add(blob);
       }
+      let strippedLayers = 0;
       for (let i = 0; i < scanBatches; i++) {
         const batch = await scratch.read<UsedBatch>(`used-${i}.json`);
         if (!batch) { unreadable = true; continue; }
         unreadable ||= batch.unreadable;
+        strippedLayers += batch.receipts?.length ?? 0;
+        for (const blob of batch.expired ?? []) doomed.add(blob);
         for (const blob of batch.blobs) keep.add(blob);
       }
-      orphans = { blobs: unreadable ? [] : [...doomed].filter(blob => !keep.has(blob)).sort(), considered: [...plan.candidates.map(candidate => candidate.id), ...remaining].sort(), unreadable };
+      const unused = [...doomed].filter(blob => !keep.has(blob)).sort();
+      const present: string[] = [];
+      if (!unreadable && plan.expiry) await eachLimited(unused, 16, async blob => { if (await store.head(blob)) present.push(blob); });
+      orphans = { strippedLayers, blobs: unreadable ? [] : plan.expiry ? present.sort() : unused, considered: [...plan.candidates.map(candidate => candidate.id), ...remaining].sort(), unreadable };
     }
     // Only blobs not yet deleted can still be saved by a newly published layer; those already gone stay gone.
     const pending = orphans.blobs.slice(state.offset * size);
@@ -331,9 +399,9 @@ export async function stepGarbage(store: ObjectStore, scratch: GcScratch, plan: 
  * and the catalog entry (what makes a layer visible) always goes before the content.
  */
 export async function collectGarbage(store: ObjectStore, plan: GcPlan, options: { readonly dryRun?: boolean } = {}): Promise<GcOutcome> {
-  if (!plan.candidates.length) return { deletedLayers: 0, deletedBlobs: 0, candidateBlobs: 0, candidateBytes: 0, deletedBytes: 0 };
+  if (!plan.candidates.length && !plan.expiry) return { deletedLayers: 0, deletedBlobs: 0, candidateBlobs: 0, candidateBytes: 0, deletedBytes: 0 };
   const doomed = new Set(plan.candidates.map(candidate => candidate.id));
   const remaining = plan.remaining ?? (await store.listKeys(LAYER_INDEX)).flatMap(key => CATALOG.exec(key)?.[2] ?? []).filter(id => !doomed.has(id));
   const step = await stepGarbage(store, memoryScratch(), { ...plan, remaining }, { dryRun: options.dryRun ?? false });
-  return { deletedLayers: step.deletedLayers, deletedBlobs: step.deletedBlobs, candidateBlobs: step.candidateBlobs ?? 0, candidateBytes: step.candidateBytes ?? 0, deletedBytes: step.deletedBytes ?? 0 };
+  return { ...(plan.expiry ? { strippedLayers: step.strippedLayers } : {}), deletedLayers: step.deletedLayers, deletedBlobs: step.deletedBlobs, candidateBlobs: step.candidateBlobs ?? 0, candidateBytes: step.candidateBytes ?? 0, deletedBytes: step.deletedBytes ?? 0 };
 }

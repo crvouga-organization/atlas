@@ -4,6 +4,7 @@
  * the environment and the flags in precedence) and the garbage collection policy (read by the server each time it
  * collects). Storage and authentication are deployment-owned and are not editable here.
  */
+import { isDeepStrictEqual } from 'node:util';
 import { ServerEditableSettingsSchema } from '../../schema/src/server-config';
 import { GcPolicySchema, type GcPolicy, type GcRun, type GcSnapshot } from '../../schema/src/user-state';
 import { ConfigError, loadServerConfig, type ResolvedServerConfig } from './config';
@@ -48,7 +49,7 @@ export function storedSettings(config: ResolvedServerConfig, argv: readonly stri
     precedence: `Saved in S3 (${USER_STATE_KEY}) and applied after restart. The configuration file, environment variables and command-line flags override them.`
   });
   const gcSnapshot = (stored: { state: { gc?: GcPolicy }; revision: string; exists: boolean }): GcSnapshot => ({
-    revision: stored.revision, policy: stored.state.gc ? GcPolicySchema.parse(stored.state.gc) : null, saved: stored.state.gc !== undefined, lastRuns, stateKey: USER_STATE_KEY
+    revision: stored.revision, source: config.gcSource ?? (stored.state.gc ? 'saved' : 'none'), policy: config.gc ?? (stored.state.gc ? GcPolicySchema.parse(stored.state.gc) : null), saved: stored.state.gc !== undefined, lastRuns, stateKey: USER_STATE_KEY
   });
   const settings: ServerSettings = {
     read: async () => snapshot(await userState.read().catch(conflict)),
@@ -68,9 +69,15 @@ export function storedSettings(config: ResolvedServerConfig, argv: readonly stri
     async save(input, revision) {
       const parsed = GcPolicySchema.safeParse(input);
       if (!parsed.success) throw new ConfigError(parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; '));
+      if (config.gc && !isDeepStrictEqual(parsed.data, config.gc)) {
+        throw new ConfigError('The deployment controls the garbage collection policy. Save its configured values to activate it.');
+      }
       return gcSnapshot(await userState.update(revision, state => ({ ...state, gc: parsed.data })).catch(conflict));
     },
-    policy: async () => { const { state } = await userState.read(); return state.gc ? GcPolicySchema.parse(state.gc) : null; },
+    async policy() {
+      const { state } = await userState.read();
+      return state.gc ? config.gc ?? GcPolicySchema.parse(state.gc) : null;
+    },
     record(runs) { lastRuns = [...runs, ...lastRuns.filter(old => !runs.some(run => run.project === old.project))].slice(0, 50); }
   };
   return { settings, gc };

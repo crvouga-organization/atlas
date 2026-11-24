@@ -58,9 +58,9 @@ describe('a deployment that is not configured yet', () => {
     expect(await response.text()).toContain('Atlas needs a private store');
   });
 
-  test('refuses to serve with neither tokens nor trusted publishers: anyone could administer it', async () => {
+  test.each([undefined, '1'])('requires a publishing identity even with ATLAS_INSECURE=%s', async insecure => {
     const { blob } = deployment();
-    const handler = createAtlasHandler({ env: { BLOB_READ_WRITE_TOKEN: BLOB_TOKEN, VERCEL_BLOB_API_URL: BLOB_API }, cwd: '/nonexistent', fetch: blob.fetch });
+    const handler = createAtlasHandler({ env: { BLOB_READ_WRITE_TOKEN: BLOB_TOKEN, VERCEL_BLOB_API_URL: BLOB_API, ATLAS_INSECURE: insecure }, cwd: '/nonexistent', fetch: blob.fetch });
     const response = await handler(new Request(`${ORIGIN}/api/server`));
     expect(response.status).toBe(503);
     expect(await response.text()).toContain('Set ATLAS_TOKEN');
@@ -137,6 +137,10 @@ describe('the scheduled pass', () => {
     const handler = instance();
     expect((await handler(new Request(`${ORIGIN}/api/cron`))).status).toBe(401);
     expect((await read(handler, '/api/cron', PUBLISH)).status).toBe(401);
+    for (const route of ['/api/cron/gc', '/api/cron/maintain']) {
+      expect((await read(handler, route, READ)).status).toBe(401);
+      expect((await read(handler, route, ADMIN)).status).toBe(200);
+    }
     const ran = await read(handler, '/api/cron', 'cron-secret-value-1');
     expect(ran.status).toBe(200);
     expect(await ran.json()).toMatchObject({ ok: true, gc: null, note: expect.stringContaining('No garbage collection policy') });

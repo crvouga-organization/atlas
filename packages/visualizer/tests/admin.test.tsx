@@ -51,6 +51,7 @@ function server(saved: { policy: typeof policy | null; settings?: Record<string,
         runs: [{ project: 'default', dryRun: true, at: '2026-10-28T00:00:00Z', candidates: 7, deletedLayers: 0, deletedBlobs: 0, keptLayers: 3 }],
         policy: state.policy
       });
+    if (url === '/api/projects/default/storage') return Response.json({ bytes: 12500, objects: 8, prefix: {}, producer: {}, branch: {}, role: {} });
     if (url === '/api/settings/gc') {
       if (init.method === 'PUT') state.policy = JSON.parse(init.body as string);
       return Response.json({ revision: init.method === 'PUT' ? next : revision, policy: state.policy, saved: state.policy !== null, lastRuns: [], stateKey: 'server/state.json' });
@@ -73,7 +74,8 @@ test('admin page loads settings and the policy with Bearer authentication and sa
   expect(document.getElementById('configuration')).toBeNull();
   await type('token', 'admin-secret');
   await click('load');
-  expect(calls.map((call) => call.url)).toEqual(['/api/settings', '/api/settings/gc']);
+  expect(calls.map((call) => call.url)).toEqual(['/api/settings', '/api/settings/gc', '/api/projects/default/storage']);
+  expect(document.getElementById('gc-empty')?.textContent).toContain('Project storage:');
   expect((document.getElementById('refreshSeconds') as HTMLInputElement).value).toBe('20');
   expect(document.querySelector('label[for="refreshSeconds"]')?.parentElement?.textContent).toContain('Current: 17');
   await type('refreshSeconds', '25');
@@ -137,6 +139,7 @@ test('a saved policy is shown as loaded from S3, and a preview lists what would 
 test('invalid JSON and stale revisions block saves until corrected or reloaded', async () => {
   let requests = 0;
   globalThis.fetch = (async (url: string) => {
+    if (url === '/api/projects/default/storage') return Response.json({ bytes: 0, objects: 0 });
     requests++;
     if (url === '/api/settings/gc') return Response.json({ revision, policy: null, saved: false, lastRuns: [], stateKey: 'server/state.json' });
     return requests <= 2

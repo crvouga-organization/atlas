@@ -59,7 +59,7 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
       child.server.close(); children.delete(slug);
     }
   };
-  const timer = setInterval(expire, 60_000); timer.unref?.();
+  const timer = options.refreshOnRequestMs === undefined ? setInterval(expire, 60_000) : null; timer?.unref?.();
   /** The application of one named project, created on first use over a store scoped to it. `null` when too many are active. */
   const ensureChild = (slug: string) => {
     let child = children.get(slug);
@@ -102,7 +102,7 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
     return work;
   };
   let lastCollectedAt = 0;
-  const gcTimer = options.gc ? setInterval(() => {
+  const gcTimer = options.gc && options.refreshOnRequestMs === undefined ? setInterval(() => {
     void (async () => {
       if (closed) return;
       // A pass left running (by a restart, or a step that ran out of time) is carried on before any new one starts.
@@ -125,9 +125,21 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
     : Response.json({ ...pass, policy }, { headers: { 'cache-control': 'no-store' } });
 
   /** One scheduled pass: what the timers above do, for a host where nothing runs between requests. */
-  async function maintain(): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string; readonly pass?: GcPass | null }> {
+  async function maintain(task: 'maintain' | 'gc' | 'all' = 'all'): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string; readonly pass?: GcPass | null }> {
     await base.ready;
-    await Promise.allSettled([base.index.refresh(), discover()]);
+    await discover();
+    if (task !== 'gc') {
+      await base.sweep?.();
+      for (const slug of known) {
+        if (slug === 'default') continue;
+        const child = ensureChild(slug);
+        if (!child) throw new Error('Project capacity reached during maintenance.');
+        child.pending++;
+        try { await child.server.ready; await child.server.sweep?.(); }
+        finally { child.pending--; }
+      }
+    }
+    if (task === 'maintain') return { gc: null, note: 'Project maintenance finished.' };
     if (!options.gc) return { gc: null, note: 'Garbage collection is managed by the embedding application.' };
     const current = await passes.current();
     if (current) {
@@ -249,6 +261,6 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
         return problemResponse(503, 'The project backend is unavailable. Retry later.');
       }
     },
-    close() { closed = true; clearInterval(timer); if (gcTimer) clearInterval(gcTimer); base.close(); for (const child of children.values()) child.server.close(); children.clear(); }
+    close() { closed = true; if (timer) clearInterval(timer); if (gcTimer) clearInterval(gcTimer); base.close(); for (const child of children.values()) child.server.close(); children.clear(); }
   };
 }

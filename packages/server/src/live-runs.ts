@@ -8,7 +8,9 @@ import { LiveRunSchema, type LiveRun, type LiveRunStartSchema, type LiveRunUpdat
 import type { ObjectStore } from '../../reports/src/object-store';
 import { readUtf8, writeUtf8 } from '../../reports/src/object-io';
 import { publishChecks } from '../../reports/src/publish-checks';
-import { layerCatalogKey } from '../../reports/src/layer-store';
+import { layerEvidence, layerResultKeys, combineEvidence, replaces } from '../../reports/src/layer-merge';
+import { eachLimited } from '../../reports/src/completion-order';
+import { layerKey, readLayer, layerCatalogKey } from '../../reports/src/layer-store';
 import type { ReportLayer } from '../../reports/src/layer-types';
 
 type Start = z.output<typeof LiveRunStartSchema>;
@@ -29,6 +31,7 @@ export class LiveRunError extends Error {
  * const live = new LiveRuns({ store, timeoutMs: 30_000, stalledMs: 900_000, onChange: () => {}, onLayer: async () => {} });
  */
 export class LiveRuns {
+  private readonly progress = new Map<string, Map<string, number>>();
   private readonly held = new Map<string, Held>();
   private readonly attempts = new Map<string, { sequence: number; digest: string; at: number }>();
   private readonly queues = new Map<string, Promise<unknown>>();
@@ -71,6 +74,7 @@ export class LiveRuns {
     const next: Held = { ...state, states: new Map(), run: { ...state.run, status: 'interrupted', reason, finishedAtMs: this.now(), running: 0,
       current: state.run.current.map(check => ({ ...check, status: 'not-run', detail: reason })) } };
     await this.save(next);
+    this.progress.delete(next.run.id);
     this.held.set(next.run.id, next);
     this.options.onChange(next.run);
   }
@@ -164,17 +168,62 @@ export class LiveRuns {
       this.attempts.set(id, { sequence: input.sequence, digest, at: now });
       if (finished.length) {
         const layer = await publishChecks(this.options.store, { producer: state.run.producer, environment: state.run.environment, branch: state.run.branch, sha: state.run.sha, recordedAtMs: now,
-          labels: { 'atlas.run': id }, checks: finished });
+          ...(run.compactOnFinish ? { run: { id } } : {}), labels: { 'atlas.run': id }, checks: finished });
+        if (run.compactOnFinish) {
+          const progress = this.progress.get(id) ?? new Map<string, number>();
+          progress.set(layer.id, layer.recordedAtMs);
+          this.progress.set(id, progress);
+        }
         await this.options.onLayer(layerCatalogKey(layer.recordedAtMs, layer.id), layer);
+      }
+      if (run.status === 'completed' && this.progress.has(id)) {
+        await writeUtf8(this.options.store, `server/live-compaction/${id}.json`, JSON.stringify({ owner, summary: keyOf(run), layers: [...this.progress.get(id)!] }), 'application/json');
       }
       const next = { ...state, states, run, digest };
       await this.save(next);
       this.held.set(id, next);
       this.attempts.delete(id);
+      if (input.finish) this.progress.delete(id);
       this.options.onChange(run);
       return run;
     });
   }
+  /** Remove progress layers that a durable final layer of this completed invocation supersedes in every slot. */
+  async compact(id: string, owner: string, final: ReportLayer, eligible: ReadonlySet<string>, forget: (ids: ReadonlySet<string>) => Promise<void>): Promise<void> {
+    await this.ready;
+    await this.locked(id, async () => {
+      const receipt = `server/live-compaction/${id}.json`;
+      const text = await readUtf8(this.options.store, receipt);
+      if (!text) return;
+      const record = JSON.parse(text) as { owner: string; summary: string; layers: [string, number][] };
+      if (owner !== record.owner) throw new LiveRunError(403, 'This run belongs to another publisher.');
+      const summary = await readUtf8(this.options.store, record.summary);
+      if (!summary || JSON.parse(summary).run?.status !== 'completed') return;
+      if (final.run?.id !== id || final.labels?.['atlas.run']) throw new LiveRunError(409, 'Expected the final layer of this invocation.');
+      const finalRows = layerEvidence(final, '');
+      const winners = new Map(combineEvidence({ specs: [], sha: null, changedFiles: [] }, [finalRows]).unassigned.map(result => [result.key, result]));
+      const removed = new Set<string>();
+      await eachLimited(record.layers, 16, async ([layerId, time]) => {
+        if (!eligible.has(layerId)) return;
+        const layer = await readLayer(this.options.store, layerId);
+        if (layer) {
+          if (layer.labels?.['atlas.run'] !== id || layer.branch !== final.branch || layer.freshness !== final.freshness) return;
+          const prior = layerEvidence(layer, '');
+          const keyOf = layerResultKeys(prior.layer);
+          if (!prior.rows.every(row => {
+            const winner = winners.get(keyOf(row));
+            return winner && replaces(winner, { ...winner, layer: prior.layer, row });
+          })) return;
+          await this.options.store.delete(layerCatalogKey(time, layerId));
+          await this.options.store.delete(layerKey(layerId));
+        }
+        removed.add(layerId);
+      });
+      await forget(removed);
+      await this.options.store.delete(receipt);
+    });
+  }
+
   /** Expire silent producers and optional progress stalls. Heartbeats cannot revive an expired run. */
   async sweep(): Promise<void> {
     await this.ready;

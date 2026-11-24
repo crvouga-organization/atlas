@@ -10,6 +10,7 @@ import { describe, expect, test } from 'bun:test';
 import type { GcPolicy } from '../../schema/src/user-state';
 import { collectGarbage, planGarbage } from '../src/garbage';
 import { publishChecks } from '../src/publish-checks';
+import { createReportsApp } from '../src/reports-route';
 import { ReportIndex } from '../src/report-index';
 import { memoryStore } from './memory-store';
 
@@ -110,4 +111,35 @@ describe('garbage collection', () => {
     await collectGarbage(store, plan);
     expect(await collectGarbage(store, plan)).toMatchObject({ deletedLayers: 0, deletedBlobs: 0 });
   });
+});
+
+test('preview and collection expire superseded evidence while keeping protected and shared bytes', async () => {
+  const { store, index } = await seed([991, 992, 993, 999], day => (day === 991 ? 'unique redacted log '.repeat(800) : day === 992 ? 'failed log '.repeat(1000) : shared));
+  const plan = await planGarbage(store, { policy: policy({ attachments: { maxAgeDays: 3, keepForStatus: ['failed'] } }), nowMs: NOW, eligible: index.superseded() });
+  const preview = await collectGarbage(store, plan, { dryRun: true });
+  expect(preview).toMatchObject({ strippedLayers: 2, candidateBlobs: 1, deletedBlobs: 0 });
+  expect(await store.listKeys('layers/blobs/')).toHaveLength(3);
+  const outcome = await collectGarbage(store, plan);
+  expect(outcome).toMatchObject({ strippedLayers: 2, deletedLayers: 0, deletedBlobs: 1 });
+  const [receipt] = await store.listKeys('server/attachment-expiry/');
+  const id = receipt!.split('/')[2];
+  const reports = createReportsApp({ store });
+  const detail = await reports.request(`/evidence/detail/shared/${id}?check=login`);
+  expect(detail.status).toBe(200);
+  const historical = await detail.text();
+  expect(historical).toContain('Evidence expired: log.txt');
+  expect(historical).not.toContain('bundleKey');
+  expect(await store.listKeys('layers/manifests/')).toHaveLength(4);
+  expect(await store.listKeys('layers/blobs/')).toHaveLength(2);
+});
+
+test('a byte budget collects the oldest eligible layer first and stops once under budget', async () => {
+  const { store, index } = await seed([996, 997, 998, 999]);
+  const sizes = await (await import('../src/storage-usage')).projectStorage(store);
+  const plan = await planGarbage(store, { policy: policy({ maxBytes: sizes.bytes - 1 }), nowMs: NOW, eligible: index.superseded() });
+  expect(plan.candidates.map(entry => entry.recordedAtMs / DAY)).toEqual([996]);
+  await collectGarbage(store, plan);
+  const after = await (await import('../src/storage-usage')).projectStorage(store);
+  expect(after.bytes).toBeLessThan(sizes.bytes);
+  expect(after.producer.suite?.objects).toBe(7);
 });

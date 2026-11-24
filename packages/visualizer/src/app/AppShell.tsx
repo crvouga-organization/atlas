@@ -2,6 +2,7 @@ import { isStatechartFile } from '@crvouga/atlas/schema';
 import { Alert, Box, Burger, Button, Container, Drawer, Flex, Group, Paper, ScrollArea, Stack, Text } from '@mantine/core';
 import { useMediaQuery } from '@mantine/hooks';
 import { Outlet, useLocation, useSearch } from '@tanstack/react-router';
+import { useFinderOpen } from '../find/open';
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { UiCatalogProvider, useServerCatalog } from '../catalog/provider';
 import { Header } from '../components/Header';
@@ -117,15 +118,19 @@ function Layout() {
   );
 }
 export function AppShell() {
+  const [fullTests, setFullTests] = useState(false);
+  const finder = useFinderOpen();
   const { run } = useSearch({ strict: false });
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
+  const paged = pathname === '/' && !fullTests && !finder && !search.test && (!search.tab || search.tab === 'runs') && !search.evidence && !search.inRun && !search.release && !search.releaseSha && !search.releasePlatform && search.sort !== 'evidence' && search.sort !== 'relevance' &&
+    (!search.q || search.q.split(/\s+/).every(token => /^(has:video|status:(passed|failed|flaky|running|not-run))$/.test(token)));
   // The UI catalog read through the server needs none of the report's other evidence: it is not read for that page.
   const catalogFromServer = useServerCatalog() && pathname === '/catalog';
   return (
     <LiveRunsProvider enabled={!run}>
       <AtlasProvider run={run}>
-        <EvidenceProvider deferEffective={catalogFromServer}>
-          <TestCatalogProvider>
+        <EvidenceProvider deferEffective={catalogFromServer} browseTests={paged}>
+          <TestCatalogProvider loadFull={() => setFullTests(true)}>
             <Layout />
           </TestCatalogProvider>
         </EvidenceProvider>

@@ -1,9 +1,9 @@
-// The whole Atlas server, viewer and API, as one function. Everything it needs comes from the environment:
+// Atlas API and settings function. The CDN serves the viewer. Everything it needs comes from the environment:
 // BLOB_READ_WRITE_TOKEN (set when the Blob store is connected), ATLAS_TOKEN and ATLAS_READ_TOKEN. This file holds no
 // Atlas logic, so upgrading is bumping @crvouga/atlas in package.json (Dependabot does it, and merges it).
 import { createAtlasHandler } from '@crvouga/atlas/server/serverless';
 
-const handle = createAtlasHandler();
+const handle = createAtlasHandler({ site: 'public' });
 
 export const GET = handle;
 export const HEAD = handle;

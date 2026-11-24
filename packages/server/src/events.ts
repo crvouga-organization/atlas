@@ -22,6 +22,8 @@ const MAX_BACKLOG = 256;
 export class EventHub {
   readonly #subscribers = new Set<Subscriber>();
   readonly #max: number;
+  readonly #poll?: { readonly everyMs: number; readonly refresh: () => Promise<unknown> };
+  #pollTimer: ReturnType<typeof setInterval> | null = null;
   readonly #heartbeatMs: number;
   readonly #encoder = new TextEncoder();
   #id = 0;
@@ -29,7 +31,8 @@ export class EventHub {
 
   readonly #maxStreamMs: number | undefined;
 
-  constructor(options: { readonly maxSubscribers?: number; readonly heartbeatMs?: number; /** End each stream after this long; the viewer reconnects by itself (for hosts that cut long requests). */ readonly maxStreamMs?: number } = {}) {
+  constructor(options: { readonly poll?: { everyMs: number; refresh: () => Promise<unknown> }; readonly maxSubscribers?: number; readonly heartbeatMs?: number; /** End each stream after this long; the viewer reconnects by itself (for hosts that cut long requests). */ readonly maxStreamMs?: number } = {}) {
+    this.#poll = options.poll;
     this.#max = options.maxSubscribers ?? 500;
     this.#heartbeatMs = options.heartbeatMs ?? 15_000;
     this.#maxStreamMs = options.maxStreamMs;
@@ -84,6 +87,11 @@ export class EventHub {
 
   #startTimer(): void {
     if (this.#timer) return;
+    if (this.#poll) {
+      const poll = this.#poll;
+      this.#pollTimer = setInterval(() => { void poll.refresh().catch(() => {}); }, poll.everyMs);
+      this.#pollTimer.unref?.();
+    }
     // A named event, not a comment: proxies see traffic, and the viewer (which a browser does not tell about comments) can tell a quiet
     // server from a dead connection.
     const ping = this.#encoder.encode('event: ping\ndata: {}\n\n');
@@ -92,6 +100,8 @@ export class EventHub {
   }
 
   #stopTimer(): void {
+    if (this.#pollTimer) clearInterval(this.#pollTimer);
+    this.#pollTimer = null;
     if (this.#timer) clearInterval(this.#timer);
     this.#timer = null;
   }

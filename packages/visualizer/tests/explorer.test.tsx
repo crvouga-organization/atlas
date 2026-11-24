@@ -613,3 +613,28 @@ test('environment insights start bounded and keep a selected environment visible
   expect(atlas.host.querySelector('section[aria-label="All environment insights"]')).toBeNull();
   expect(insights().querySelector('button[title^="Web"]')?.getAttribute('aria-pressed')).toBe('true');
 });
+
+test('a 5000-test project opens with one bounded catalog page and no effective report', async () => {
+  const store = memoryStore();
+  await publishChecks(store, { producer: 'ci', recordedAtMs: 1, checks: Array.from({ length: 5000 }, (_, i) => ({
+    id: String(i).padStart(5, '0'), title: 'Checkout test ' + String(i).padStart(5, '0'), status: i % 20 ? 'passed' : 'failed'
+  })) });
+  const node = createNode({ stores: [{ id: 'shared', store }] });
+  try {
+    await node.ready;
+    atlas = await openAtlas({ at: '/?view=tests', specs: {}, deps: {}, node });
+    await atlas.until(() => shows('Checkout test 00099'), 'the first hundred cards');
+    expect(shows('Checkout test 00100')).toBe(false);
+    expect(atlas.requests.some(path => path.startsWith('/evidence/effective'))).toBe(false);
+    const gzip = await import('node:zlib');
+    let bytes = 0;
+    for (const path of atlas.requests) {
+      const response = await node.fetch(new Request('http://atlas/api/reports' + path));
+      bytes += gzip.gzipSync(new Uint8Array(await response.arrayBuffer())).byteLength;
+    }
+    expect(bytes).toBeLessThan(100_000);
+    await atlas.click('button', 'Next page');
+    await atlas.until(() => shows('Checkout test 00100'), 'second page');
+    expect(shows('Checkout test 00000')).toBe(false);
+  } finally { node.close(); }
+});

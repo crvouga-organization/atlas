@@ -13,6 +13,65 @@
       "maximum": 3650,
       "description": "A superseded layer is eligible once it was recorded more than this many days ago"
     },
+    "maxBytes": {
+      "description": "Project storage budget in bytes or decimal units such as 10GB. Above budget the oldest eligible layers may be collected before their age limit.",
+      "anyOf": [
+        {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "string",
+          "pattern": "^[1-9]\\d*(?:KB|MB|GB|TB)$"
+        }
+      ]
+    },
+    "attachments": {
+      "description": "Expire captured attachments of superseded layers independently from their result history. The first matching rule sets the age. Protected statuses take precedence.",
+      "type": "object",
+      "properties": {
+        "maxAgeDays": {
+          "type": "number",
+          "minimum": 0
+        },
+        "keepForStatus": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "branch": {
+                "type": "string"
+              },
+              "maxAgeDays": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "maxAgeDays"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "maxAgeDays"
+      ],
+      "additionalProperties": false
+    },
     "keepLatest": {
       "default": 20,
       "description": "Always keep this many of the newest layers, however old, so recent history stays",

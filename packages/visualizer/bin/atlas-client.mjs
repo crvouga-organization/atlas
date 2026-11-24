@@ -12,7 +12,7 @@ const USAGE = `atlas client: browse project specifications and their test report
 
 Usage
   atlas client dev          [--specs <dir>] [--runs <dir>] [--port <n>] [--host <host>]
-  atlas client build        [--specs <dir>] [--runs <dir>] [--out <dir>] [--keep <n>] [--no-data]
+  atlas client build        [--specs <dir>] [--runs <dir>] [--out <dir>] [--keep <n>] [--no-data] [--api-base <path>]
   atlas client publish-data [--specs <dir>] [--runs <dir>] [--out <dir>] [--keep <n>]
 
 Options
@@ -23,6 +23,7 @@ Options
   --out <dir>      build: the static site (default ./atlas-site); publish-data: the data (default ./atlas-data)
   --keep <n>       how many of the newest runs to publish (default 30)
   --no-data        build: leave the data out; point the site at it with VITE_ATLAS_BASE_URL
+  --api-base <path> build: same-origin API root for a CDN-hosted viewer (for example /api)
   --port <n>       dev: port to listen on (default 5180, or the next free one)
   --host <host>    dev: address to listen on (default localhost)
 
@@ -46,6 +47,7 @@ function parse(argv) {
       keep: { type: 'string' },
       port: { type: 'string' },
       host: { type: 'string' },
+      'api-base': { type: 'string' },
       'no-data': { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false }
     }
@@ -170,12 +172,16 @@ async function main(argv) {
   if (command === 'build') {
     const out = path.resolve(base, values.out ?? 'atlas-site');
     assertSafeOut(out, base);
+    const api = values['api-base'];
+    if (api !== undefined && !/^\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\/?$/.test(api)) throw new UsageError('--api-base needs a same-origin path such as /api');
+
     const { build } = await import('vite');
     await build({
       configFile: CONFIG_FILE,
       configLoader: 'runner',
       root: APP_ROOT,
       publicDir: false,
+      ...(api ? { base: '/', define: { 'import.meta.env.VITE_ATLAS_API_BASE': JSON.stringify(api.replace(/\/$/, '')) } } : {}),
       build: { outDir: out, emptyOutDir: true }
     });
     await buildSettingsPage(out);

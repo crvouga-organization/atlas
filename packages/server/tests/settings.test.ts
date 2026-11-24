@@ -45,3 +45,24 @@ describe('every documented setting does what its row says', () => {
     expect(SERVER_FLAGS.filter(flag => !documented.has(flag))).toEqual([]);
   });
 });
+
+test('deployment retention can be configured without a saved user policy', () => {
+  const config = loadServerConfig([], { ...S3_TEST_ENV, ATLAS_GC_MAX_AGE_DAYS: '3' }, cwd, read);
+  expect(config.gc).toEqual({ enabled: true, maxAgeDays: 3, keepLatest: 20, intervalHours: 24 });
+  expect(config.gcSource).toBe('env');
+});
+
+test('a deployment policy is inactive until its first admin save and deployment fields are read-only', async () => {
+  const { storedSettings } = await import('../src/settings');
+  const { userStateStore } = await import('../src/user-state');
+  const { memoryStore } = await import('../../reports/tests/memory-store');
+  const env = { ...S3_TEST_ENV, ATLAS_GC_MAX_AGE_DAYS: '3' };
+  const config = loadServerConfig(['--config', 'atlas.server.json'], env, cwd, () => JSON.stringify({ gc: { maxAgeDays: 7, keepLatest: 4 } }));
+  const { gc } = storedSettings(config, [], env, cwd, userStateStore(memoryStore()));
+  const proposed = await gc.read();
+  expect(proposed).toMatchObject({ source: 'env', saved: false, policy: { maxAgeDays: 3, keepLatest: 4 } });
+  expect(await gc.policy()).toBeNull();
+  await expect(gc.save({ ...proposed.policy, keepLatest: 0 }, proposed.revision)).rejects.toThrow('deployment controls');
+  expect((await gc.save(proposed.policy, proposed.revision)).saved).toBe(true);
+  expect(await gc.policy()).toEqual(proposed.policy);
+});

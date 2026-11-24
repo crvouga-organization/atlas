@@ -255,7 +255,7 @@ The quickest way to run the server: no container, bucket or proxy, and CI publis
 it:
 
 ```ts
-// api/atlas.ts: the viewer and the API, every path rewritten to it
+// api/atlas.ts: API, settings and health endpoints
 import { createAtlasHandler } from '@crvouga/atlas/server/serverless';
 const handle = createAtlasHandler();
 export const GET = handle, HEAD = handle, POST = handle, PUT = handle, PATCH = handle, DELETE = handle, OPTIONS = handle;
@@ -278,9 +278,10 @@ What changes on a function host, and what does not:
   chunks of several files each, so they are always served by the function.
 - **Live updates** come over a stream the server ends after 4 minutes (`ATLAS_STREAM_MAX_SECONDS`), before the
   function's time limit; the viewer reconnects by itself.
+- The template builds the viewer into `public/` with `--api-base /api`. Vercel serves the viewer and its assets from the CDN. API calls, probes and the settings page reach the function.
+- **Protected deployment check.** Enable Vercel Authentication for the production domain and set `ATLAS_ANONYMOUS_READ=1`. In a signed-out browser open both `/` and `/api/server` and confirm Vercel requests sign-in. In a signed-in browser open a report. Publish from CI with the automation bypass header and verify the result appears. See [Deployment Protection](https://vercel.com/docs/deployment-protection) and [automation bypass](https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/protection-bypass-automation).
 - **Publishing from CI** needs no token: the template trusts the GitHub account it was deployed into ([trusted
-  publishing](server.md#trusted-publishing)). Keep Vercel Authentication off for the production domain, which is
-  Vercel's default, or CI needs its bypass secret in `ATLAS_HEADERS` as well.
+  publishing](server.md#trusted-publishing)). On a protected production domain, pass the Vercel automation bypass secret in `ATLAS_HEADERS` as well.
 - **Updates are automatic.** Dependabot proposes each release and the template's workflow merges minor and patch ones;
   Vercel redeploys on the merge.
 - **A configuration problem is a page.** Until storage and tokens are right, every request is answered with the

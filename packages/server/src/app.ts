@@ -22,7 +22,8 @@ import { storeRedirect, UNTRUSTED_HEADERS } from '../../reports/src/attachment-r
 import { combineBackends, summarize, type BackendInput, type CombinedReport } from '../../reports/src/compose';
 import { combineEvidence } from '../../reports/src/layer-merge';
 import type { LayerHeader } from '../../reports/src/evidence-types';
-import { layerCatalogKey } from '../../reports/src/layer-store';
+import { projectStorage } from '../../reports/src/storage-usage';
+import { readLayer, layerCatalogKey } from '../../reports/src/layer-store';
 import { createLayersApp } from '../../reports/src/layers-route';
 import type { ReportOutline } from '../../reports/src/layer-types';
 import type { ObjectStore } from '../../reports/src/object-store';
@@ -97,6 +98,8 @@ export type AtlasServerOptions = {
   readonly checkpointEveryMs?: number;
   /** End each live stream after this many milliseconds, so a host's maximum request duration never cuts one; the viewer reconnects. */
   readonly streamMaxMs?: number;
+  /** Disable event streams and advertise polling to clients. */
+  readonly eventsOff?: boolean;
   /**
    * Files larger than this many bytes go straight to storage, for a host that refuses large request bodies. Needs a write
    * store that can make an upload target (Vercel Blob); ignored otherwise.
@@ -152,14 +155,16 @@ export type AtlasServer = {
    */
   collectGarbage(policy: GcPolicy, options: { readonly dryRun: boolean; readonly project: string }): Promise<GcRun>;
   /** This project's upload store and the layers its report has read that no longer decide any result, after one more look at the store: what a garbage collection pass works from. */
-  garbageSource(): Promise<{ readonly store: ObjectStore; readonly eligible: ReadonlySet<string> }>;
+  garbageSource(): Promise<{ readonly store: ObjectStore; readonly eligible: ReadonlySet<string>; readonly defaultBranch?: string }>;
   /**
    * What timers do on a long-running server, done once, for a scheduler to call where nothing runs between requests: look
    * at the store, expire silent live runs, and carry on a garbage collection pass, or start one when a saved, enabled
    * policy is due (the time of the last pass is kept in the store). A pass is advanced within `gcBudgetMs`, so this never
    * outlives a function's maximum duration. Present on the server `createAtlasServer` returns.
    */
-  maintain?(): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string; readonly pass?: GcPass | null }>;
+  maintain?(task?: 'maintain' | 'gc' | 'all'): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string; readonly pass?: GcPass | null }>;
+  /** Refresh this project and sweep expired producer and collection leases. */
+  sweep?(): Promise<void>;
   /** Stop refreshing and end every live connection. */
   close(): void;
 };
@@ -193,7 +198,7 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
   const limits = { object: (options.limits?.maxObjectMiB ?? 256) * MiB, json: (options.limits?.maxJsonMiB ?? 32) * MiB };
   // The checkpoint lives beside the leases, in the server's own store: a start reads it instead of every layer.
   const index = new ReportIndex(backends, { now, ...(options.include ? { include: options.include } : {}), checkpoint: options.liveStore ?? writeBackend.store, ...(options.checkpointEveryMs !== undefined ? { checkpointEveryMs: options.checkpointEveryMs } : {}), ...(options.log ? { log: options.log } : {}) });
-  const events = new EventHub({ maxSubscribers: options.limits?.maxStreams ?? 500, heartbeatMs: options.heartbeatMs ?? 15_000, ...(options.streamMaxMs ? { maxStreamMs: options.streamMaxMs } : {}) });
+  const events = new EventHub({ ...(options.refreshOnRequestMs !== undefined ? { poll: { everyMs: Math.max(100, options.refreshOnRequestMs), refresh: () => index.refresh() } } : {}), maxSubscribers: options.limits?.maxStreams ?? 500, heartbeatMs: options.heartbeatMs ?? 15_000, ...(options.streamMaxMs ? { maxStreamMs: options.streamMaxMs } : {}) });
   // Direct uploads need a store that can say where a publisher may write one key itself.
   const uploadTarget = (writeBackend.store as Partial<Pick<VercelBlobStore, 'uploadTarget'>>).uploadTarget?.bind(writeBackend.store);
   const directOverBytes = uploadTarget && options.directUploadOverBytes !== undefined ? options.directUploadOverBytes : null;
@@ -212,11 +217,11 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
       }
     } });
   const sweepQueue = () => { void catalogQueue.sweep().catch(error => options.log?.({ level: 'error', queue: 'ui-catalog', error: String(error) })); };
-  const leaseTimer = setInterval(() => {
+  const leaseTimer = options.refreshOnRequestMs !== undefined ? null : setInterval(() => {
     void live.sweep().catch(error => options.log?.({ level: 'error', error: String(error) }));
     if (catalogQueue.active) sweepQueue();
   }, Math.min(5000, options.runTimeoutMs ?? 30_000));
-  leaseTimer.unref?.();
+  leaseTimer?.unref?.();
   const compressed = new Map<string, Promise<Uint8Array>>();
   const assets = new Map<string, Promise<Uint8Array>>();
 
@@ -393,12 +398,17 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
       backends: snapshot.backends.map(({ id, label, available }) => ({ id, label, available, write: id === options.write })),
       ...(({ backends: _unused, ...rest }) => rest)(index.stats()),
       uploads: { directOverBytes }, streamMaxSeconds: options.streamMaxMs ? Math.floor(options.streamMaxMs / 1000) : null,
-      capabilities: { events: true, ingest: true, store: true, checks: true, status: true, effective: true, live: true, tests: true, artifactTags: true, artifactSearch: true, reviewCollections: true, recordingVerification: true, catalogEntries: true, catalogQueue: true, catalogIndex: true }
+      capabilities: { events: !options.eventsOff, ingest: true, store: true, checks: true, status: true, effective: true, live: true, tests: true, artifactTags: true, artifactSearch: true, reviewCollections: true, recordingVerification: true, catalogEntries: true, catalogQueue: true, catalogIndex: true }
     });
   });
 
+  app.get('/api/storage', async c => {
+    const verdict = auth.check(c.req.raw, 'admin');
+    if (!verdict.ok) return unauthorized(verdict);
+    return c.json(await projectStorage(writeBackend.store), 200, { 'cache-control': 'no-store' });
+  });
   app.get('/api/live', async c => c.json({ runs: await live.list() }, 200, { 'cache-control': 'no-store' }));
-  const writeLive = async (c: Context, action: 'start' | 'update' | 'heartbeat') => {
+  const writeLive = async (c: Context, action: 'start' | 'update' | 'heartbeat' | 'compact') => {
     const verdict = auth.check(c.req.raw, 'publish');
     if (!verdict.ok) return unauthorized(verdict);
     // A CI identity token is renewed every few minutes; the run belongs to the publisher it names, not to one token.
@@ -410,6 +420,15 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
       const bytes = await readLimited(c.req.raw, Math.min(limits.json, 2 * MiB));
       let input: unknown;
       try { input = JSON.parse(new TextDecoder().decode(bytes)); } catch { return problemResponse(422, 'The body is not JSON.'); }
+      if (action === 'compact') {
+        const finalId = (input as { layer?: unknown } | null)?.layer;
+        if (typeof finalId !== 'string' || !/^[0-9a-f]{64}$/.test(finalId)) return problemResponse(422, 'Invalid final layer id.');
+        const final = await readLayer(writeBackend.store, finalId);
+        if (!final || !(await writeBackend.store.head(layerCatalogKey(final.recordedAtMs, finalId)))) return problemResponse(409, 'Publish the final layer first.');
+        await index.accept(writeBackend.id, layerCatalogKey(final.recordedAtMs, finalId), final);
+        if (backends.length === 1) await live.compact(id, owner, final, index.superseded(), ids => index.forgetLiveProgress(id, ids));
+        return c.json({ ok: true });
+      }
       const schema = action === 'start' ? LiveRunStartSchema : LiveRunUpdateSchema;
       const parsed = schema.safeParse(input);
       if (!parsed.success) return problemResponse(422, parsed.error.message);
@@ -427,6 +446,7 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
   };
   app.post('/api/live/:id', c => writeLive(c, 'start'));
   app.patch('/api/live/:id', c => writeLive(c, 'update'));
+  app.post('/api/live/:id/compact', c => writeLive(c, 'compact'));
   app.post('/api/live/:id/heartbeat', c => writeLive(c, 'heartbeat'));
 
   app.get('/admin', async c => c.html(await renderSettingsPage(options.site), 200, { 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'x-content-type-options': 'nosniff' }));
@@ -483,7 +503,7 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
   });
 
   // Live updates: told when the report changes, and when specs or runs do.
-  app.get('/api/events', c => events.stream(c.req.raw, () => ({ version: index.snapshot().version, ready: index.ready, time: now(), heartbeatMs: options.heartbeatMs ?? 15_000 })));
+  app.get('/api/events', c => options.eventsOff ? problemResponse(503, 'Event streaming is disabled. Poll the report instead.') : events.stream(c.req.raw, () => ({ version: index.snapshot().version, ready: index.ready, time: now(), heartbeatMs: options.heartbeatMs ?? 15_000 })));
 
   // The report as it stands: one request, only what wins. Everything else about a layer is history.
   app.get('/api/reports/evidence/effective', async c => {
@@ -912,7 +932,7 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
     try {
       // Look at the store once more first, so "superseded" is judged on everything uploaded so far.
       await index.refreshNow();
-      const plan = await planGarbage(writeBackend!.store, { policy, nowMs: now(), eligible: index.superseded() });
+      const plan = await planGarbage(writeBackend!.store, { policy, defaultBranch: options.outlineBranch, nowMs: now(), eligible: index.superseded() });
       // A dry run walks the same steps without deleting, so it says what a real pass would free: layers, blobs and bytes.
       const outcome = await collectGarbage(writeBackend!.store, plan, { dryRun: run.dryRun });
       if (outcome.deletedLayers) options.log?.({ at: new Date(now()).toISOString(), level: 'info', gc: run.project, deletedLayers: outcome.deletedLayers, deletedBlobs: outcome.deletedBlobs });
@@ -937,9 +957,10 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
     async garbageSource() {
       // Look at the store once more first, so "superseded" is judged on everything uploaded so far.
       await index.refreshNow();
-      return { store: writeBackend!.store, eligible: new Set(index.superseded()) };
+      return { store: writeBackend!.store, defaultBranch: options.outlineBranch, eligible: new Set(index.superseded()) };
     },
-    ready: index.start(options.refreshMs ?? 10_000),
-    close: () => { clearInterval(leaseTimer); stopListening(); index.stop(); events.close(); }
+    async sweep() { await Promise.all([index.refreshNow(), live.sweep(), catalogQueue.sweep()]); },
+    ready: options.refreshOnRequestMs === undefined ? index.start(options.refreshMs ?? 10_000) : index.restore().then(() => undefined),
+    close: () => { if (leaseTimer) clearInterval(leaseTimer); stopListening(); index.stop(); events.close(); }
   };
 }

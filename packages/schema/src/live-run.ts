@@ -15,6 +15,7 @@ export const LiveCheckSchema = z.object({
 export const LiveRunStartSchema = z.object({
   id: z.string().uuid(), producer: z.string().min(1).max(200), title: z.string().max(2048).optional(),
   environment: z.string().max(200).optional(), branch: z.string().max(500).optional(), sha: z.string().max(200).optional(),
+  compactOnFinish: z.boolean().optional().describe('The publisher will confirm a final layer after completing this invocation'),
   plannedChecks: z.number().int().nonnegative().max(1_000_000).optional()
 });
 /** Ordered deltas. A retried sequence must have identical content; terminal runs never accept more progress. */

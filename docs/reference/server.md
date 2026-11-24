@@ -48,6 +48,8 @@ export type AtlasServerOptions = {
   readonly checkpointEveryMs?: number;
   /** End each live stream after this many milliseconds, so a host's maximum request duration never cuts one; the viewer reconnects. */
   readonly streamMaxMs?: number;
+  /** Disable event streams and advertise polling to clients. */
+  readonly eventsOff?: boolean;
   /**
    * Files larger than this many bytes go straight to storage, for a host that refuses large request bodies. Needs a write
    * store that can make an upload target (Vercel Blob); ignored otherwise.
@@ -57,8 +59,6 @@ export type AtlasServerOptions = {
    * Send a browser playing or downloading a run's recording (video, audio, a trace zip) straight to the store, with a
    * `302` to a URL that works for five minutes, when the store can sign one (S3, Vercel Blob). Off: every byte goes
    * through the server. Worth it where the server is a function billed by the second; a store whose address browsers
-   * cannot reach (a bucket on a private network) must leave it off.
-   */
   …
 ```
 
@@ -82,14 +82,16 @@ export type AtlasServer = {
    */
   collectGarbage(policy: GcPolicy, options: { readonly dryRun: boolean; readonly project: string }): Promise<GcRun>;
   /** This project's upload store and the layers its report has read that no longer decide any result, after one more look at the store: what a garbage collection pass works from. */
-  garbageSource(): Promise<{ readonly store: ObjectStore; readonly eligible: ReadonlySet<string> }>;
+  garbageSource(): Promise<{ readonly store: ObjectStore; readonly eligible: ReadonlySet<string>; readonly defaultBranch?: string }>;
   /**
    * What timers do on a long-running server, done once, for a scheduler to call where nothing runs between requests: look
    * at the store, expire silent live runs, and carry on a garbage collection pass, or start one when a saved, enabled
    * policy is due (the time of the last pass is kept in the store). A pass is advanced within `gcBudgetMs`, so this never
    * outlives a function's maximum duration. Present on the server `createAtlasServer` returns.
    */
-  maintain?(): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string; readonly pass?: GcPass | null }>;
+  maintain?(task?: 'maintain' | 'gc' | 'all'): Promise<{ readonly gc: readonly GcRun[] | null; readonly note: string; readonly pass?: GcPass | null }>;
+  /** Refresh this project and sweep expired producer and collection leases. */
+  sweep?(): Promise<void>;
   /** Stop refreshing and end every live connection. */
   close(): void;
 };
@@ -289,6 +291,7 @@ export type ResolvedServerConfig = Omit<ServerConfig, 'auth'> & {
   readonly anonymousRead: boolean;
   readonly insecure: boolean;
   /** Where the config came from, for the first line of the log. */
+  readonly gcSource?: 'env' | 'config';
   readonly configFile: string | null;
   /** Where this server was built from (`ATLAS_REVISION`, `ATLAS_BUILD_TIME`, `ATLAS_IMAGE_DIGEST` and the installed version), for `GET /api/server`. */
   readonly build: BuildInfo;
@@ -468,7 +471,7 @@ The runs of the newest finished real pass, for `GET /api/settings/gc` on any ins
 #### `GcSource`
 
 ```ts
-export type GcSource = { readonly store: ObjectStore; readonly eligible: ReadonlySet<string> };
+export type GcSource = { readonly store: ObjectStore; readonly eligible: ReadonlySet<string>; readonly defaultBranch?: string };
 ```
 
 What one project offers a pass: its store, and the layers its report has read that no longer decide any result.
@@ -620,6 +623,7 @@ const live = new LiveRuns({ store, timeoutMs: 30_000, stalledMs: 900_000, onChan
 - `async start(input: Start, owner: string): Promise<LiveRun>` — Register one producer lease. Retrying an identical start is idempotent.
 - `async heartbeat(id: string, owner: string): Promise<void>` — Renew liveness by server receipt time, independently of whether a test made progress.
 - `async update(id: string, input: Update, owner: string): Promise<LiveRun>` — Apply one ordered progress batch and publish its completed checks before acknowledging it.
+- `async compact(id: string, owner: string, final: ReportLayer, eligible: ReadonlySet<string>, forget: (ids: ReadonlySet<string>) => Promise<void>): Promise<void>` — Remove progress layers that a durable final layer of this completed invocation supersedes in every slot.
 - `async sweep(): Promise<void>` — Expire silent producers and optional progress stalls. Heartbeats cannot revive an expired run.
 
 ### llms.txt of a running server

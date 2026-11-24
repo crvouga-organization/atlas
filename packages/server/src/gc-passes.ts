@@ -34,7 +34,7 @@ const KEEP_FINISHED = 20;
 type Stored = GcPass & { readonly policy: GcPolicy; readonly nowMs: number; readonly projectList: readonly string[]; readonly lease?: { readonly owner: string; readonly until: number } | null };
 
 /** What one project offers a pass: its store, and the layers its report has read that no longer decide any result. */
-export type GcSource = { readonly store: ObjectStore; readonly eligible: ReadonlySet<string> };
+export type GcSource = { readonly store: ObjectStore; readonly eligible: ReadonlySet<string>; readonly defaultBranch?: string };
 
 /** What `GcPasses` needs from the server. */
 export type GcPassesOptions = {
@@ -185,7 +185,7 @@ export class GcPasses {
         if (!step.done) { await save({ ...pass, progress: { ...this.#totals(pass), ...this.#add(this.#totals(pass), step), project, phase: step.phase } }, true); break; }
         const run: GcRun = {
           project, dryRun: pass.dryRun, at: new Date(this.#now()).toISOString(), candidates: step.candidates, deletedLayers: step.deletedLayers, deletedBlobs: step.deletedBlobs,
-          keptLayers: step.kept, candidateBlobs: step.candidateBlobs ?? 0, candidateBytes: step.candidateBytes ?? 0, deletedBytes: step.deletedBytes ?? 0,
+          ...(step.strippedLayers !== undefined ? { strippedLayers: step.strippedLayers } : {}), keptLayers: step.kept, candidateBlobs: step.candidateBlobs ?? 0, candidateBytes: step.candidateBytes ?? 0, deletedBytes: step.deletedBytes ?? 0,
           ...(step.unreadable ? { error: 'A layer could not be read, so no captured files were deleted: what cannot be read is unknown, never unused.' } : {})
         };
         const runs = [...pass.runs, run];
@@ -222,7 +222,7 @@ export class GcPasses {
     }
     if (!plan) {
       // Made once per pass and kept: every later step of this pass works from the same plan.
-      plan = await planGarbage(source.store, { policy: { ...pass.policy, enabled: true }, nowMs: pass.nowMs, eligible: source.eligible });
+      plan = await planGarbage(source.store, { policy: { ...pass.policy, enabled: true }, nowMs: pass.nowMs, defaultBranch: source.defaultBranch, eligible: source.eligible });
       await scratch.write('plan.json', plan);
     }
     const step = await stepGarbage(source.store, scratch, plan, { dryRun: pass.dryRun, deadline, now: this.#tick, onBatch: progress => onBatch(progress, progress.phase) });

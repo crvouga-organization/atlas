@@ -37,6 +37,10 @@ export function testFile(file: string | undefined, root = process.cwd()): string
  * await uploadChecks('mocha', checks, { url: 'https://atlas.example.com', token: process.env.ATLAS_PUBLISH_TOKEN });
  */
 export async function uploadChecks(runner: string, checks: readonly EvidenceCheck[], options: ReporterOptions = {}): Promise<void> {
+  await sendChecks(runner, checks, options);
+}
+
+async function sendChecks(runner: string, checks: readonly EvidenceCheck[], options: ReporterOptions, live?: import('../../reports/src/live-reporter').LiveReporter): Promise<void> {
   const url = options.url ?? process.env.ATLAS_SERVER_URL;
   if (!url) throw new Error('Atlas reporter: set ATLAS_SERVER_URL to the project Atlas server');
   const target = new URL(url);
@@ -50,17 +54,20 @@ export async function uploadChecks(runner: string, checks: readonly EvidenceChec
     body: JSON.stringify({ producer: options.producer ?? runner, recordedAtMs: options.recordedAtMs ?? Date.now(),
       environment: options.environment ?? process.env.ATLAS_ENVIRONMENT,
       branch: options.branch ?? process.env.ATLAS_BRANCH, sha: options.sha ?? process.env.ATLAS_SHA,
-      checks: uniqueChecks(checks) })
+      ...(live ? { run: { id: live.id } } : {}), checks: uniqueChecks(checks) })
   });
   if (!response.ok) { await response.body?.cancel(); throw new Error(`Atlas reporter: upload refused (HTTP ${response.status})`); }
-  await response.body?.cancel();
+  if (live?.compact && live.finishedAtMs !== undefined) {
+    const { id } = await response.json() as { id: string };
+    await live.compact(id);
+  } else await response.body?.cancel();
 }
 
 /** Start the native runner's live feed with the same endpoint and identity as its final report. */
 export function runnerLive(runner: string, options: ReporterOptions = {}, plannedChecks?: number): import('../../reports/src/live-reporter').LiveReporter {
   const url = options.url ?? process.env.ATLAS_SERVER_URL;
   if (!url) throw new Error('Atlas reporter: set ATLAS_SERVER_URL to the project Atlas server');
-  return createLiveReporter({ producer: options.producer ?? runner, plannedChecks, title: `${runner} tests`, environment: options.environment ?? process.env.ATLAS_ENVIRONMENT,
+  return createLiveReporter({ compactOnFinish: true, producer: options.producer ?? runner, plannedChecks, title: `${runner} tests`, environment: options.environment ?? process.env.ATLAS_ENVIRONMENT,
     branch: options.branch ?? process.env.ATLAS_BRANCH, sha: options.sha ?? process.env.ATLAS_SHA }, { url, project: options.project ?? process.env.ATLAS_PROJECT, token: options.token ?? process.env.ATLAS_PUBLISH_TOKEN ?? process.env.ATLAS_TOKEN, timeoutMs: options.timeoutMs });
 }
 
@@ -70,6 +77,6 @@ export async function finishRunner(live: import('../../reports/src/live-reporter
   const finalChecks = uniqueChecks(checks);
   finalChecks.forEach(check => live.check(check));
   try { await live.finish(); } catch (caught) { error = caught; }
-  try { await uploadChecks(runner, finalChecks, { ...options, recordedAtMs: Math.max(Date.now(), (live.finishedAtMs ?? 0) + 1) }); } catch (caught) { error ??= caught; }
+  try { await sendChecks(runner, finalChecks, { ...options, recordedAtMs: Math.max(Date.now(), (live.finishedAtMs ?? 0) + 1) }, live); } catch (caught) { error ??= caught; }
   if (error) throw error;
 }

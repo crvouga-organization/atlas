@@ -51,7 +51,20 @@ export async function reportResponse(path: string, signal?: AbortSignal) {
 }
 
 export async function reportJson<T>(path: string, signal?: AbortSignal): Promise<T> {
-  return (await reportResponse(path, signal)).json() as Promise<T>;
+  const response = await reportResponse(path, signal);
+  if (typeof Worker === 'undefined' || !(path.startsWith('/evidence/effective') || path.startsWith('/tests?limit=20000'))) return response.json() as Promise<T>;
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength < 256 * 1024) return JSON.parse(new TextDecoder().decode(buffer)) as T;
+  signal?.throwIfAborted();
+  const worker = new Worker(new URL('./json.worker.ts', import.meta.url), { type: 'module' });
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => { worker.terminate(); signal?.removeEventListener('abort', abort); };
+    const abort = () => { stop(); reject(signal?.reason); };
+    signal?.addEventListener('abort', abort, { once: true });
+    worker.onmessage = event => { stop(); if (event.data.error) reject(new Error(event.data.error)); else resolve(event.data.value as T); };
+    worker.onerror = event => { stop(); reject(new Error(event.message)); };
+    worker.postMessage(buffer, [buffer]);
+  });
 }
 
 export async function reportText(path: string, signal?: AbortSignal) {

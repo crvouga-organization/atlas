@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAtlas } from '../app/atlas-context';
 import type { AtlasView } from '../data/model';
 import { LATEST } from '../data/queries';
+import { useTestCatalog } from '../explorer/catalog';
 import { useEvidence } from '../evidence/evidence-context';
 import { plural } from '../evidence/format';
 import { excludedCount } from '../evidence/sources-panel';
@@ -141,6 +142,7 @@ export function Header() {
     [evidence.files, evidence.view, kind]
   );
   const project = currentProject();
+  const summary = useTestCatalog().model?.summary;
   const catalogOpen = pathname === '/catalog';
   const critiquesOpen = pathname === '/critiques';
   const behaviorsOpen = pathname === '/behaviors';
@@ -178,7 +180,7 @@ export function Header() {
               Behaviors
             </Button>
           )}
-          {(hasCatalog || catalogOpen) && (
+          {(hasCatalog || summary?.hasUiCatalog || catalogOpen) && (
             <Button {...destination(catalogOpen)} leftSection={<IconLayoutGrid size={16} aria-hidden="true" />}
               renderRoot={(props) => <Link {...props} to="/catalog" search={(prev) => runOnly(prev)} />}>
               UI catalog
@@ -241,7 +243,7 @@ export function Header() {
                   Behaviors
                 </Menu.Item>
               )}
-              {(hasCatalog || catalogOpen) && (
+              {(hasCatalog || summary?.hasUiCatalog || catalogOpen) && (
                 <Menu.Item
                   leftSection={<IconLayoutGrid size={16} aria-hidden="true" />}
                   aria-current={catalogOpen ? 'page' : undefined}
@@ -250,7 +252,7 @@ export function Header() {
                   UI catalog
                 </Menu.Item>
               )}
-              {(hasCritiques || critiquesOpen) && (
+              {(hasCritiques || summary?.hasCritiques || critiquesOpen) && (
                 <Menu.Item
                   leftSection={<IconSparkles size={16} aria-hidden="true" />}
                   aria-current={critiquesOpen ? 'page' : undefined}

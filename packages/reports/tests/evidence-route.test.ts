@@ -39,7 +39,7 @@ test('every backend contributes layers that name where they came from, and each 
   expect(first.layers.map(layer => [layer.id, layer.backend, layer.branch, layer.counts.failed])).toEqual([[local.id, 'local', 'feat/list', 1], [shared.id, 'shared', 'main', 0], [device.id, 'device-lab', 'main', 0]]);
   expect(first.backends).toEqual([{ id: 'local', label: 'This machine', live: true, available: true }, { id: 'shared', label: 'Shared reports', live: false, available: true }, { id: 'device-lab', label: 'Device lab', live: false, available: true }]);
   const rows = await app.request(`/evidence/rows/device-lab/${device.id}`);
-  expect(rows.headers.get('cache-control')).toContain('immutable');
+  expect(rows.headers.get('cache-control')).toContain('no-cache');
   expect(((await rows.json()) as LayerRows).rows.map(row => [row.id, row.status, row.specPath])).toEqual([['join', 'passed', 'specs/list.feature']]);
   expect((await app.request(`/evidence/rows/shared/${device.id}`)).status).toBe(404);
   expect((await app.request(`/evidence/rows/nowhere/${device.id}`)).status).toBe(404);

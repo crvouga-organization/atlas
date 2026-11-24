@@ -24,13 +24,14 @@ describe('the Vercel template', () => {
     const exported = JSON.parse(readFileSync(path.resolve(import.meta.dir, '../../../package.json'), 'utf8')) as { exports: Record<string, unknown>; publishConfig: { exports: Record<string, unknown> } };
     expect(exported.exports['./server/serverless']).toBeDefined();
     expect(exported.publishConfig.exports['./server/serverless']).toBeDefined();
-    expect(vercel.functions['api/atlas.ts']?.includeFiles).toBe('atlas-site/**');
-    expect(pkg.scripts.build).toBe('atlas client build --no-data --out atlas-site');
+    expect(vercel.functions['api/atlas.ts']?.includeFiles).toBe('public/admin/**');
+    expect(pkg.scripts.build).toBe('atlas client build --no-data --out public --api-base /api');
     expect(pkg.dependencies['@crvouga/atlas']).toMatch(/^\^1\./);
   });
 
   test('every path reaches the function with the path it asked for, and the cron path is the scheduled pass', async () => {
-    expect(vercel.rewrites).toEqual([{ source: '/(.*)', destination: '/api/atlas?__atlas_path=/$1' }]);
+    expect(vercel.rewrites).toContainEqual({ source: '/api/:path*', destination: '/api/atlas?__atlas_path=/api/:path*' });
+    expect(vercel.rewrites.at(-1)?.destination).toBe('/index.html');
     expect(vercel.crons.map(cron => cron.path)).toEqual(['/api/cron']);
     // Hobby plans allow one run a day: a more frequent schedule would fail the deployment.
     expect(vercel.crons.every(cron => /^\d+ \d+ \* \* \*$/.test((cron as unknown as { schedule: string }).schedule))).toBe(true);

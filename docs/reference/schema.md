@@ -1287,6 +1287,38 @@ export type CritiqueMark = z.output<typeof CritiqueMarkSchema>;
 
 A mark as stored in a check's `extensions["atlas.critique-mark"]`.
 
+### gc-policy.ts
+
+Source: `packages/schema/src/gc-policy.ts`
+
+@module Garbage collection policy shared by deployment configuration and saved settings
+
+#### `GcPolicySchema`
+
+```ts
+export const GcPolicySchema = …
+```
+
+The garbage collection policy: which report layers the server may delete from S3, and when. Only layers that the
+report has loaded and that no longer decide any result (every check they carry has since been superseded by a newer
+layer) are ever candidates, and the newest `keepLatest` layers are always kept. With `enabled: false` nothing is deleted.
+
+#### `GcPolicy`
+
+```ts
+export type GcPolicy = z.output<typeof GcPolicySchema>;
+```
+
+A garbage collection policy as stored, defaults applied.
+
+#### `GcPolicyInput`
+
+```ts
+export type GcPolicyInput = z.input<typeof GcPolicySchema>;
+```
+
+A garbage collection policy as written, before defaults are applied.
+
 ### Schema package entry point (`@crvouga/atlas/schema`)
 
 Source: `packages/schema/src/index.ts`. Import: `@crvouga/atlas/schema`
@@ -3110,32 +3142,6 @@ document that does not exist yet means nothing has been chosen; a document that 
 an empty state. Unknown keys are kept, so an older server does not drop what a newer one wrote.
 
 See docs/server.md#user-state-and-garbage-collection
-
-#### `GcPolicySchema`
-
-```ts
-export const GcPolicySchema = …
-```
-
-The garbage collection policy: which report layers the server may delete from S3, and when. Only layers that the
-report has loaded and that no longer decide any result (every check they carry has since been superseded by a newer
-layer) are ever candidates, and the newest `keepLatest` layers are always kept. With `enabled: false` nothing is deleted.
-
-#### `GcPolicy`
-
-```ts
-export type GcPolicy = z.output<typeof GcPolicySchema>;
-```
-
-A garbage collection policy as stored, defaults applied.
-
-#### `GcPolicyInput`
-
-```ts
-export type GcPolicyInput = z.input<typeof GcPolicySchema>;
-```
-
-A garbage collection policy as written, before defaults are applied.
 
 #### `GcRunSchema`
 

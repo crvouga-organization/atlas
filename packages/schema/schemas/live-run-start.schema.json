@@ -29,6 +29,10 @@
       "type": "string",
       "maxLength": 200
     },
+    "compactOnFinish": {
+      "description": "The publisher will confirm a final layer after completing this invocation",
+      "type": "boolean"
+    },
     "plannedChecks": {
       "type": "integer",
       "minimum": 0,

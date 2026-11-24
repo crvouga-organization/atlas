@@ -160,3 +160,59 @@ test('one SSE stream carries start, logs, heartbeat, completion, and expiry with
     expect(await next('run')).toMatchObject({ status: 'interrupted', running: 0 });
   } finally { await reader.cancel(); }
 });
+
+test('a published final layer compacts only the completed invocation it covers', async () => {
+  const store = memoryStore();
+  const app = createAtlasServer({ backends: [{ id: 'data', store }], write: 'data' });
+  apps.push(app);
+  await app.ready;
+  const host = await listen(app.fetch, { host: '127.0.0.1', port: 0, maxBodyBytes: 32 << 20 });
+  hosts.push(host);
+  const live = createLiveReporter({ producer: 'unit', compactOnFinish: true }, { url: host.url });
+  const checks = Array.from({ length: 40 }, (_, i) => ({ id: String(i), title: String(i), status: 'passed' as const }));
+  for (const check of checks) { live.check(check); await live.flush(); }
+  expect(await store.listKeys('layers/index/')).toHaveLength(40);
+  await live.finish();
+  const final = await fetch(host.url + '/api/checks', { method: 'POST', body: JSON.stringify({
+    checks, producer: 'unit', run: { id: live.id }, recordedAtMs: live.finishedAtMs! + 1
+  }) });
+  const { id } = await final.json();
+  await live.compact!(id);
+  expect(await store.listKeys('layers/index/')).toHaveLength(1);
+  expect(await store.listKeys('layers/manifests/')).toHaveLength(1);
+  expect(app.index.history.of(JSON.stringify(['', '0']))).toHaveLength(1);
+  const { ReportIndex } = await import('../../reports/src/report-index');
+  const fresh = new ReportIndex([{ id: 'data', store }]);
+  await fresh.refresh();
+  expect(app.index.history.run('run:' + live.id)).toEqual(fresh.history.run('run:' + live.id));
+  expect(app.index.snapshot().layers[0]?.rows).toHaveLength(40);
+});
+
+test.each(['completed', 'interrupted'] as const)('compaction preserves uncovered progress of a %s invocation', async finish => {
+  const store = memoryStore();
+  const app = createAtlasServer({ backends: [{ id: 'data', store }], write: 'data' });
+  apps.push(app);
+  await app.ready;
+  const identity = { ...start(), compactOnFinish: true };
+  const send = async (path: string, payload: unknown, method = 'POST') => {
+    const response = await app.fetch(new Request('http://atlas/api/' + path, {
+      method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload)
+    }));
+    expect(response.ok).toBe(true);
+    return response.json();
+  };
+  const run = 'live/' + identity.id;
+  await send(run, identity);
+  const a = { id: 'a', title: 'A', status: 'passed' };
+  const b = { id: 'b', title: 'B', status: 'failed' };
+  await send(run, { sequence: 1, checks: [a] }, 'PATCH');
+  await send(run, { sequence: 2, checks: [b], finish }, 'PATCH');
+  const progress = await store.listKeys('layers/index/');
+  expect(progress).toHaveLength(2);
+  const final = await send('checks', { producer: 'unit', run: { id: identity.id }, checks: [a], recordedAtMs: Date.now() + 10 });
+  await send(run + '/compact', { layer: final.id });
+  await send(run + '/compact', { layer: final.id });
+  const remaining = await store.listKeys('layers/index/');
+  expect(progress.filter(key => remaining.includes(key))).toHaveLength(finish === 'completed' ? 1 : 2);
+  expect(app.index.snapshot().layers.flatMap(entry => entry.rows).map(row => row.id).sort()).toEqual(['a', 'b']);
+});

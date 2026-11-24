@@ -31,6 +31,7 @@ import { videoCounts } from './evidence-detail';
 import { productLatency } from './latency';
 import { matchesScope, scopeTokens, UNKNOWN_SCOPE } from './evidence-scope';
 import { checkSlots, type CheckSlot } from './evidence-view';
+import { isUiKind } from './ui-state';
 import { combineEvidence, emptyCounts, slotKey, specPath as normalSpecPath, type EvidenceResult } from './layer-merge';
 import { RecordedSpecs } from './recorded-specs';
 
@@ -194,6 +195,9 @@ export type CatalogGroup = {
 
 /** The report at a glance: counts, timing and insights over every test (not only those a query matched). */
 export type CatalogSummary = {
+  /** Navigation destinations represented by the current report. */
+  readonly hasUiCatalog?: boolean;
+  readonly hasCritiques?: boolean;
   readonly tests: number;
   /** Tests by their current status. */
   readonly counts: StatusCounts;
@@ -244,6 +248,10 @@ export type TestSort = (typeof TEST_SORTS)[number];
 
 /** Which tests to list. Every field is optional; several values of one field match any of them, and fields combine. */
 export type TestQuery = {
+  /** Require a playable recording in a current result. */
+  readonly video?: boolean;
+  /** Return exact filter counts before pagination. */
+  readonly counts?: boolean;
   /** Words that must all appear in the title, id, spec, domain, tags, labels, environments or producers. Case does not matter. */
   readonly q?: string;
   /** Current status, or `flaky`. */
@@ -263,6 +271,8 @@ export type TestQuery = {
   /** Only tests recorded in this run (a key from `runList`). */
   readonly run?: string;
   readonly sort?: TestSort;
+  /** Continue after this test key in the filtered sort order. */
+  readonly cursor?: string;
   readonly offset?: number;
   /** At most this many tests (default 500, at most 20000). */
   readonly limit?: number;
@@ -270,6 +280,10 @@ export type TestQuery = {
 
 /** `GET /api/reports/tests`: the summary, the facets and the tests that match a query. */
 export type TestCatalog = {
+  /** Counts for the current filters with the counted dimension omitted, before pagination. */
+  /** Last test key on this page when another page follows. */
+  readonly nextCursor?: string;
+  readonly filterCounts?: { status: Record<string, number>; environment: Record<string, number>; video: number };
   readonly schemaVersion: typeof TEST_CATALOG_VERSION;
   /** Changes whenever the report or its history does. */
   readonly version: string;
@@ -692,6 +706,31 @@ export class TestHistory {
     if (list.length > HISTORY_PER_TEST) list.pop();
   }
 
+  /** Forget superseded live progress from an invocation after its final layer has been stored. */
+  async forgetProgress(runId: string, ids: ReadonlySet<string>, read: (id: string) => Promise<LayerEvidence>): Promise<void> {
+    if (!ids.size) return;
+    const key = `run:${runId}`;
+    const run = this.#runs.get(key);
+    if (run) {
+      // Recompute the run timestamps, receipts and evidence counts from its surviving members.
+      // A publisher can add another member while the reads are pending.
+      const kept = new TestHistory();
+      for (const member of run.members) {
+        if (ids.has(member.id)) continue;
+        const evidence = await read(member.id);
+        kept.add(evidence.layer, evidence.rows, [], member.backend, evidence.fingerprints);
+      }
+      const replacement = kept.#runs.get(key);
+      if (replacement) this.#runs.set(key, replacement);
+      else this.#runs.delete(key);
+    }
+    for (const [slot, entries] of this.#bySlot) {
+      if (entries.some(entry => ids.has(entry.o.layer))) this.#bySlot.set(slot, entries.filter(entry => !ids.has(entry.o.layer)));
+    }
+    for (const id of ids) this.#seen.delete(id);
+    this.#rev++;
+  }
+
   /** The recorded results of one test (by `TestSummary.key`), newest first. Empty when none. */
   of(key: string): readonly TestResultEntry[] {
     const entries = this.#bySlot.get(key) ?? [];
@@ -1071,6 +1110,8 @@ export function catalogModel(layers: readonly LayerEvidence[], sources: CatalogS
   const averages = tests.flatMap(test => (test.stats.durations ? [test.stats.durations.avgMs] : []));
   const lastRecordedAtMs = tests.length ? Math.max(...tests.map(test => test.lastRecordedAtMs)) : null;
   const summary: CatalogSummary = {
+    hasUiCatalog: layers.some(entry => entry.rows.some(row => isUiKind(row.kind))),
+    hasCritiques: layers.some(entry => entry.rows.some(row => row.critique !== undefined)),
     tests: tests.length,
     counts,
     outcomes: tests.reduce((sum, test) => sum + test.outcomes.length, 0),
@@ -1121,6 +1162,7 @@ const SORTERS: Record<TestSort, (a: TestSummary, b: TestSummary) => number> = {
 export function matchesQuery(model: CatalogModel, test: TestSummary, query: TestQuery, inRun?: ReadonlySet<string> | null): boolean {
   const words = (query.q ?? '').toLowerCase().split(/\s+/).filter(Boolean);
   if (words.length) { const hay = model.haystacks.get(test.key) ?? ''; if (!words.every(word => hay.includes(word))) return false; }
+  if (query.video && !test.scopeProfiles?.length) return false;
   if (query.status?.length && !query.status.some(status => (status === 'flaky' ? test.stats.flaky : test.status === status))) return false;
   if (query.environment?.length && !query.environment.some(env => test.environments.includes(env) || (env === '(none)' && !test.environments.length))) return false;
   if (query.producer?.length && !query.producer.some(producer => test.producers.includes(producer))) return false;
@@ -1139,9 +1181,27 @@ export function testCatalog(model: CatalogModel, query: TestQuery = {}): TestCat
   const matched = model.tests.filter(test => matchesQuery(model, test, query, inRun));
   const sorter = SORTERS[query.sort ?? 'spec'] ?? SORTERS.spec;
   matched.sort((a, b) => sorter(a, b) || compareText(a.key, b.key));
-  const offset = Math.max(0, Math.floor(query.offset ?? 0));
+  const cursorIndex = query.cursor ? matched.findIndex(test => test.key === query.cursor) : -1;
+  const offset = cursorIndex >= 0 ? cursorIndex + 1 : Math.max(0, Math.floor(query.offset ?? 0));
   const limit = Math.min(20_000, Math.max(0, Math.floor(query.limit ?? 500)));
-  return { schemaVersion: TEST_CATALOG_VERSION, version: model.version, generatedAtMs: model.generatedAtMs, summary: model.summary, facets: model.facets, total: matched.length, offset, limit, tests: matched.slice(offset, offset + limit) };
+  let filterCounts: TestCatalog['filterCounts'];
+  if (query.counts) {
+    const status: Record<string, number> = Object.create(null), environment: Record<string, number> = Object.create(null);
+    let video = 0;
+    for (const test of model.tests) {
+      if (matchesQuery(model, test, { ...query, status: [] }, inRun)) {
+        for (const value of ['', test.status, ...(test.stats.flaky ? ['flaky'] : [])]) status[value] = (status[value] ?? 0) + 1;
+      }
+      if (matchesQuery(model, test, { ...query, environment: [] }, inRun)) {
+        for (const value of test.environments) environment[value] = (environment[value] ?? 0) + 1;
+      }
+      if (test.scopeProfiles?.length && matchesQuery(model, test, { ...query, video: false }, inRun)) video++;
+    }
+    filterCounts = { status, environment, video };
+  }
+  const tests = matched.slice(offset, offset + limit);
+  const nextCursor = offset + limit < matched.length ? tests.at(-1)?.key : undefined;
+  return { ...(nextCursor ? { nextCursor } : {}), ...(filterCounts ? { filterCounts } : {}), schemaVersion: TEST_CATALOG_VERSION, version: model.version, generatedAtMs: model.generatedAtMs, summary: model.summary, facets: model.facets, total: matched.length, offset, limit, tests };
 }
 
 /** One test and its recorded results, or null when the report has no test with that key. */
@@ -1235,6 +1295,9 @@ export function parseTestQuery(params: URLSearchParams): TestQuery {
   const query: Record<string, unknown> = {};
   const q = params.get('q');
   if (q) query.q = q;
+  if (params.has('cursor')) query.cursor = params.get('cursor');
+  if (params.get('counts') === '1') query.counts = true;
+  if (many('has').includes('video')) query.video = true;
   for (const name of ['status', 'environment', 'producer', 'domain', 'spec', 'tag', 'artifactTag', 'scope']) { const values = many(name); if (values.length) query[name] = values; }
   if (['1', 'true'].includes(params.get('inherited') ?? '')) query.inherited = true;
   const run = params.get('run');

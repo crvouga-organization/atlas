@@ -31,13 +31,15 @@ import {
   TextInput,
   ThemeIcon
 } from '@mantine/core';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { PageHeader, Panel } from '../components/Page';
 import { GROUND } from '../ui/theme';
 
+type StorageUsage = { bytes: number; objects: number } & Record<'prefix' | 'producer' | 'branch' | 'role', Record<string, { bytes: number; objects: number }>>;
 type Settings = Record<string, unknown>;
 type GcPolicy = { enabled: boolean; maxAgeDays: number; keepLatest: number; intervalHours: number };
-type GcRun = { project: string; dryRun: boolean; at: string; candidates: number; deletedLayers: number; deletedBlobs: number; keptLayers: number; error?: string; candidateBlobs?: number; candidateBytes?: number; deletedBytes?: number };
+type GcRun = {
+  strippedLayers?: number; project: string; dryRun: boolean; at: string; candidates: number; deletedLayers: number; deletedBlobs: number; keptLayers: number; error?: string; candidateBlobs?: number; candidateBytes?: number; deletedBytes?: number };
 /** A garbage collection pass as the server keeps it: it may run longer than one request, so it is polled. */
 type GcPass = {
   id: string;
@@ -164,6 +166,22 @@ export function SettingsPage() {
     setJsonError('');
   };
   const [policy, setPolicy] = useState<GcPolicy>(SUGGESTED_POLICY);
+  const [usage, setUsage] = useState<StorageUsage>();
+  const usageRequest = useRef(0);
+  const [usageError, setUsageError] = useState(false);
+  const [usageProject, setUsageProject] = useState('default');
+  const measure = async (project: string) => {
+    const request = ++usageRequest.current;
+    setUsage(undefined);
+    setUsageError(false);
+    try {
+      const data = await readJson(await fetch(`/api/projects/${encodeURIComponent(project)}/storage`, { headers: authorization(), cache: 'no-store' })) as StorageUsage;
+      if (request === usageRequest.current) setUsage(data);
+    } catch {
+      if (request === usageRequest.current) setUsageError(true);
+    }
+  };
+  const [policyOwner, setPolicyOwner] = useState<string>();
   const [policySaved, setPolicySaved] = useState(false);
   const [runs, setRuns] = useState<GcRun[]>([]);
   const [preview, setPreview] = useState<GcRun[]>();
@@ -201,9 +219,10 @@ export function SettingsPage() {
     setPass(undefined);
     return data;
   };
-  const applyGc = (data: { revision: string; policy: GcPolicy | null; saved: boolean; lastRuns: GcRun[]; currentPass?: GcPass | null }) => {
+  const applyGc = (data: { revision: string; policy: GcPolicy | null; saved: boolean; source?: string; lastRuns: GcRun[]; currentPass?: GcPass | null }) => {
     setPolicy(data.policy ?? SUGGESTED_POLICY);
     setPolicySaved(data.saved);
+    setPolicyOwner(data.source === 'env' ? 'environment variables' : data.source === 'config' ? 'atlas.server.json' : undefined);
     setRuns(data.lastRuns);
     setPass(data.currentPass ?? undefined);
   };
@@ -272,7 +291,7 @@ export function SettingsPage() {
       setStale(false);
       setActive(data.active);
       change(data.settings);
-      if (gc) { applyGc(gc); setPreview(undefined); }
+      if (gc) { applyGc(gc); setPreview(undefined); setUsageProject('default'); void measure('default'); }
       setMessage({
         text:
           method === 'PUT' || data.restartRequired
@@ -493,19 +512,40 @@ export function SettingsPage() {
                       >
                         <Fieldset variant="unstyled" disabled={busy} p={0} m={0} bd={0} miw={0}>
                           <Stack gap="md">
-                            {policySaved ? (
+                            {policyOwner ? <Text size="sm">This policy is managed by {policyOwner}. {!policySaved && 'Save it here to activate the configured schedule.'}</Text> : policySaved ? (
                               <Text size="sm" c="dimmed">
                                 This policy is saved in S3 (<Code>server/state.json</Code>) and the server reads it from there each time it collects.
                               </Text>
                             ) : (
                               <Alert id="gc-empty" color="orange" icon={<IconAlertTriangle size={18} aria-hidden="true" />} title="No policy has been saved yet">
                                 Garbage collection is off and nothing is deleted. The values below are suggestions; they take effect only after you
-                                turn collection on and save.
+                                turn collection on and save. {usage && `Project storage: ${bytes(usage.bytes)}.`}
                               </Alert>
+                            )}
+                            <TextInput label="Storage project" value={usageProject} onChange={event => setUsageProject(event.currentTarget.value)} />
+                            <Button type="button" onClick={() => void measure(usageProject)}>Measure project storage</Button>
+                            {usageError && <Text role="status">Storage usage is unavailable.</Text>}
+                            {usage && (
+                              <Accordion>
+                                <Accordion.Item value="storage">
+                                  <Accordion.Control>Storage usage · {bytes(usage.bytes)} · {usage.objects} objects</Accordion.Control>
+                                  <Accordion.Panel>
+                                    {(['prefix', 'producer', 'branch', 'role'] as const).map(group => (
+                                      <Stack key={group} gap="xs">
+                                        <Text fw={600}>By {group}</Text>
+                                        {Object.entries(usage[group] ?? {}).map(([name, size]) => (
+                                          <Text key={name}>{name} · {bytes(size.bytes)} · {size.objects} objects</Text>
+                                        ))}
+                                      </Stack>
+                                    ))}
+                                  </Accordion.Panel>
+                                </Accordion.Item>
+                              </Accordion>
                             )}
                             <Switch
                               id="gc-enabled"
                               label="Delete eligible layers on a schedule"
+                              disabled={Boolean(policyOwner)}
                               checked={policy.enabled}
                               onChange={(event) => setPolicy({ ...policy, enabled: event.currentTarget.checked })}
                             />
@@ -516,6 +556,7 @@ export function SettingsPage() {
                                 min={1}
                                 max={3650}
                                 allowDecimal={false}
+                                disabled={Boolean(policyOwner)}
                                 value={policy.maxAgeDays}
                                 onChange={(value) => setPolicy({ ...policy, maxAgeDays: Number(value) })}
                               />
@@ -524,6 +565,7 @@ export function SettingsPage() {
                                 label="Always keep the newest layers"
                                 min={0}
                                 allowDecimal={false}
+                                disabled={Boolean(policyOwner)}
                                 value={policy.keepLatest}
                                 onChange={(value) => setPolicy({ ...policy, keepLatest: Number(value) })}
                               />
@@ -532,6 +574,7 @@ export function SettingsPage() {
                                 label="Run every (hours)"
                                 min={1}
                                 max={720}
+                                disabled={Boolean(policyOwner)}
                                 value={policy.intervalHours}
                                 onChange={(value) => setPolicy({ ...policy, intervalHours: Number(value) })}
                               />
@@ -561,6 +604,7 @@ export function SettingsPage() {
                                     <Table.Tr>
                                       <Table.Th>Project</Table.Th>
                                       <Table.Th>{preview ? 'Would delete' : 'Deleted layers'}</Table.Th>
+                                      <Table.Th>Layers with expired files</Table.Th>
                                       <Table.Th>{preview ? 'Files' : 'Deleted files'}</Table.Th>
                                       <Table.Th>{preview ? 'Would free' : 'Freed'}</Table.Th>
                                       <Table.Th>Kept layers</Table.Th>
@@ -572,6 +616,7 @@ export function SettingsPage() {
                                       <Table.Tr key={`${run.project}-${run.at}`}>
                                         <Table.Td>{run.project}</Table.Td>
                                         <Table.Td>{preview ? run.candidates : run.deletedLayers}</Table.Td>
+                                        <Table.Td>{run.strippedLayers ?? 0}</Table.Td>
                                         <Table.Td>{preview ? (run.candidateBlobs ?? '—') : run.deletedBlobs}</Table.Td>
                                         <Table.Td>{bytes(preview ? run.candidateBytes : run.deletedBytes)}</Table.Td>
                                         <Table.Td>{run.keptLayers}</Table.Td>
@@ -584,7 +629,7 @@ export function SettingsPage() {
                             )}
                             <Divider />
                             <Group gap="xs">
-                              <Button id="gc-save" type="submit" variant="filled" loading={busy} disabled={stale}>
+                              <Button id="gc-save" type="submit" variant="filled" loading={busy} disabled={stale || (Boolean(policyOwner) && policySaved)}>
                                 Save garbage collection policy
                               </Button>
                               <Button id="gc-preview" disabled={!policySaved} loading={busy} onClick={() => void gcRequest('preview')}>

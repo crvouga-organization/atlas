@@ -448,6 +448,25 @@ export class ReportIndex {
     return this.#superseded;
   }
 
+  /** Drop history and counts for live layers confirmed superseded and compacted in this single backend. */
+  async forgetLiveProgress(runId: string, ids: ReadonlySet<string>): Promise<void> {
+    if (!ids.size || this.#backends.length !== 1) return;
+    const backend = this.#backends[0]!;
+    await this.#history.forgetProgress(runId, ids, async id => {
+      const held = this.#held.get(id);
+      if (held) return held.evidence;
+      const layer = await readLayer(backend.store, id);
+      if (!layer) throw new Error('A retained live layer could not be read.');
+      return layerEvidence(layerSummary(layer), backend.id);
+    });
+    for (const id of ids) {
+      this.#superseded.delete(id);
+      this.#attribution.delete(id);
+    }
+    this.#rev++;
+    this.#emit();
+  }
+
   /** For `/readyz` and logs. */
   stats() {
     return { backends: this.#backends.length, layers: this.#attribution.size, slots: this.#winners.size, holding: this.#held.size, failed: this.#failed.size, refreshedAt: this.#refreshedAt };
