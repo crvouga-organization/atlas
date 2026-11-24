@@ -6,6 +6,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { parse } from 'yaml';
 
 const root = path.resolve(import.meta.dir, '../../../examples/deploy/vercel');
 const read = (file: string) => readFileSync(path.join(root, file), 'utf8');
@@ -28,6 +29,17 @@ describe('the Vercel template', () => {
     expect(pkg.scripts.build).toBe('atlas client build --no-data --out public --api-base /api');
     expect(vercel.buildCommand).toBe('npm run build');
     expect(pkg.dependencies['@crvouga/atlas']).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  test('the required deployment check runs for every pull request', () => {
+    const workflow = parse(read('.github/workflows/update.yml'));
+    const ruleset = JSON.parse(read('.github/rulesets/deployment.json'));
+    expect(workflow.on).toBe('pull_request');
+    expect(workflow.jobs.build.if).toBeUndefined();
+    expect(ruleset.rules[0].parameters.required_status_checks).toEqual([
+      { context: workflow.jobs.build.name, integration_id: 15368 }
+    ]);
+    expect(workflow.jobs.merge.needs).toBe('build');
   });
 
   test('every path reaches the function with the path it asked for, and the cron path is the scheduled pass', async () => {

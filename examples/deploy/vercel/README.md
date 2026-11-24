@@ -51,10 +51,17 @@ Dependabot checks npm daily and opens a pull request for the exact Atlas version
 settings page on Node 22 and smoke-tests the function. When those checks pass for a patch or minor update, the workflow
 merges the tested commit and the Vercel Git integration deploys the production branch. Major updates wait for review.
 
-Keep GitHub Actions and Dependabot version updates enabled in the deployment repository. Allow squash merges. If branch
-rules require other checks, enable **Settings → General → Allow auto-merge** so GitHub can wait for them. Required
-reviews still apply. For a deployment cloned before these checks were added, copy the template’s workflow and configuration
-into your deployment repository once. Dependabot updates the Atlas dependency in that copy.
+GitHub stores merge settings per repository. After cloning the template, run these commands once as a repository
+administrator from the deployment repository. They require the deployment build on the default branch and enable
+GitHub auto-merge for eligible updates. Existing review requirements still apply.
+
+```sh
+gh api --method POST 'repos/{owner}/{repo}/rulesets' --input .github/rulesets/deployment.json --silent
+gh repo edit --enable-auto-merge --enable-squash-merge
+```
+
+Keep GitHub Actions and Dependabot version updates enabled. For an existing deployment, copy the updated template
+workflow, ruleset and package configuration into the deployment repository before setup.
 
 ## Notes
 

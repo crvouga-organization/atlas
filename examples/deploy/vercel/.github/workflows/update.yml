@@ -5,12 +5,11 @@ permissions:
 
 jobs:
   build:
-    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
+    name: Atlas deployment build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -25,6 +24,7 @@ jobs:
 
   merge:
     needs: build
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -40,6 +40,4 @@ jobs:
           PR: ${{ github.event.pull_request.html_url }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh pr merge "$PR" --squash --match-head-commit "$HEAD_SHA" ||
-            gh pr merge "$PR" --auto --squash --match-head-commit "$HEAD_SHA"
+        run: gh pr merge "$PR" --auto --squash --match-head-commit "$HEAD_SHA"

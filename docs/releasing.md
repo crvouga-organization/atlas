@@ -4,6 +4,13 @@ How Atlas gets from `main` to npm and to its server container image. Atlas is on
 version. npm releases are automatic after the initial seed; the server image is published on every green
 push to `main`, regardless of whether a new npm version is needed.
 
+## Pull requests to `main`
+
+GitHub enables squash auto-merge when a pull request to the default branch is ready, including pull requests from forks.
+A new revision is enrolled again if GitHub clears auto-merge. The repository ruleset requires the CI jobs on the current
+revision, including the example matrix, both server image builds and the CI summary. Documentation changes run the same
+checks. A maintainer can turn auto-merge off on the pull request or convert it to a draft.
+
 ## What happens on every push to `main`
 
 The [CI workflow](../.github/workflows/ci.yml) checks the commit (`type-check`, `test`, `build`, and
