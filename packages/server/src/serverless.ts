@@ -110,6 +110,8 @@ export function createAtlasHandler(options: AtlasHandlerOptions = {}): AtlasHand
     const server = createAtlasServer({
       settings, gc, ...serverOptionsOf(config, backends, log, options.fetch), ...(site ? { site } : {}),
       refreshOnRequestMs: config.refreshSeconds * 1000,
+      // Instances come and go: keep the checkpoint close behind, so the next one starts from it.
+      checkpointEveryMs: 30_000,
       streamMaxMs: number(env.ATLAS_STREAM_MAX_SECONDS, DEFAULT_STREAM_SECONDS) * 1000,
       directUploadOverBytes: number(env.ATLAS_DIRECT_UPLOAD_OVER_BYTES, DEFAULT_DIRECT_UPLOAD_OVER)
     });

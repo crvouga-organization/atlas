@@ -44,6 +44,8 @@ export type AtlasServerOptions = {
    * relying on timers. Unset: timers do it.
    */
   readonly refreshOnRequestMs?: number;
+  /** How often (ms) at most the report checkpoint is written after a change. Default 5 minutes; a serverless host, whose instances are short-lived, wants it sooner. */
+  readonly checkpointEveryMs?: number;
   /** End each live stream after this many milliseconds, so a host's maximum request duration never cuts one; the viewer reconnects. */
   readonly streamMaxMs?: number;
   /**
@@ -57,8 +59,6 @@ export type AtlasServerOptions = {
   /** Maximum time without progress; default 15 minutes, 0 disables. */
   readonly runStallMs?: number;
   readonly log?: (line: Record<string, unknown>) => void;
-  readonly now?: () => number;
-  readonly version?: string;
   …
 ```
 

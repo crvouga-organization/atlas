@@ -3209,6 +3209,14 @@ What makes it so, none of it at the cost of the contract:
 
 - **A layer is read once.** The report is folded incrementally; only layers that still hold a winner are kept, so
   memory follows the number of checks and not the age of the project.
+- **A start reads a checkpoint, not every layer.** The server keeps what folding each layer needs in its storage
+  (`server/checkpoint/v1/`: gzip segments of 500 layers and a head naming them with their SHA-256), written after a
+  change at most every 5 minutes (30 seconds on a serverless host). A start lists the catalog and folds each layer the
+  checkpoint holds from it, so the catalog still decides what takes part: a layer garbage collection deleted is left
+  out, and one the checkpoint does not know is read as before. The report is exactly the one every layer makes. A head
+  or segment that cannot be read, is of another format or does not match its digest is ignored with a log line, and
+  everything is read and the checkpoint written again. With 25 000 layers and 50 ms per storage request, a start takes
+  about 1.2 s and 121 requests instead of two requests per layer (the bench measures it as *start from the checkpoint*).
 - **A change costs one layer.** Each layer remembers the JSON of what it sends, the version is a hash of per-layer
   digests, and a delta lists only layers that changed, so the work to take in a result does not grow with the
   report.

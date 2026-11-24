@@ -93,6 +93,8 @@ export type AtlasServerOptions = {
    * relying on timers. Unset: timers do it.
    */
   readonly refreshOnRequestMs?: number;
+  /** How often (ms) at most the report checkpoint is written after a change. Default 5 minutes; a serverless host, whose instances are short-lived, wants it sooner. */
+  readonly checkpointEveryMs?: number;
   /** End each live stream after this many milliseconds, so a host's maximum request duration never cuts one; the viewer reconnects. */
   readonly streamMaxMs?: number;
   /**
@@ -172,7 +174,8 @@ function createProjectApplication(options: AtlasServerOptions): AtlasServer {
   const stores: ObjectStore[] = backends.map(backend => backend.store);
   const auth: Auth = createAuth(options.tokens ?? [], options.anonymousRead ?? false, options.trust);
   const limits = { object: (options.limits?.maxObjectMiB ?? 256) * MiB, json: (options.limits?.maxJsonMiB ?? 32) * MiB };
-  const index = new ReportIndex(backends, { now, ...(options.include ? { include: options.include } : {}) });
+  // The checkpoint lives beside the leases, in the server's own store: a start reads it instead of every layer.
+  const index = new ReportIndex(backends, { now, ...(options.include ? { include: options.include } : {}), checkpoint: options.liveStore ?? writeBackend.store, ...(options.checkpointEveryMs !== undefined ? { checkpointEveryMs: options.checkpointEveryMs } : {}), ...(options.log ? { log: options.log } : {}) });
   const events = new EventHub({ maxSubscribers: options.limits?.maxStreams ?? 500, heartbeatMs: options.heartbeatMs ?? 15_000, ...(options.streamMaxMs ? { maxStreamMs: options.streamMaxMs } : {}) });
   // Direct uploads need a store that can say where a publisher may write one key itself.
   const uploadTarget = (writeBackend.store as Partial<Pick<VercelBlobStore, 'uploadTarget'>>).uploadTarget?.bind(writeBackend.store);

@@ -7253,6 +7253,113 @@ already holds as `?have=`; after a failure it waits 3 seconds first) until the c
 `dispose` is called. Sources and the stylesheet are also read from the query cache so a revisit paints at once.
 Call this inside a Solid root: it creates signals and a store.
 
+### Report checkpoint
+
+Source: `packages/reports/src/report-checkpoint.ts`. Import: `@crvouga/atlas/reports/report-checkpoint`
+
+A server that starts would read every layer's catalog entry and manifest (two requests per layer, every start). The
+checkpoint keeps, in the store, what folding each layer needs (its evidence and the specs it recorded), packed into
+gzip segments of a few hundred layers, and a head that names the segments with their SHA-256. A starting `ReportIndex`
+reads the head and the segments (tens of requests instead of tens of thousands) and uses them as a cache of
+catalog entry to evidence: the catalog listing still decides which layers take part, so a layer deleted by garbage
+collection is not folded and a layer the checkpoint does not know is read as before. The report is therefore exactly
+the one recomputed from every layer, with or without a checkpoint, current or stale.
+
+Segments are immutable and named by their content, so instances that write at once never conflict; the head is
+overwritten, and any head names a correct set. A head that cannot be read, is of another format, or names a segment
+whose bytes do not match is ignored with a notice, and the index reads everything as before.
+
+See docs/server.md#performance
+
+#### `CHECKPOINT_PREFIX`
+
+```ts
+export const CHECKPOINT_PREFIX = …
+```
+
+Where the checkpoint lives in a store.
+
+#### `SEGMENT_SIZE`
+
+```ts
+export const SEGMENT_SIZE = …
+```
+
+Layers per closed segment.
+
+#### `CheckpointEntry`
+
+```ts
+export type CheckpointEntry = { readonly mark: string; readonly evidence: LayerEvidence; readonly specs: readonly SpecEntry[] };
+```
+
+What folding one layer needs: which catalog entry of which backend (`mark`, `<backend>|<key>`), its evidence and its recorded specs.
+
+#### `LoadedCheckpoint`
+
+```ts
+export type LoadedCheckpoint = { readonly entries: Map<string, CheckpointEntry>; readonly closed: readonly { readonly ref: SegmentRef; readonly marks: readonly string[] }[]; readonly open: readonly CheckpointEntry[] };
+```
+
+A checkpoint as read: every entry by mark, the closed segments (with the marks in each) that may be named again unchanged, and the open segment's entries.
+
+#### `readCheckpoint`
+
+```ts
+export async function readCheckpoint(store: ObjectStore): Promise<LoadedCheckpoint | { readonly error: string } | null>
+```
+
+Reads the checkpoint in `store`. Returns `null` when there is none, and `{ error }` when there is one that cannot be
+trusted (unreadable, another format, a segment missing or not matching its digest): the caller reads everything instead.
+
+#### `writeSegment`
+
+```ts
+export async function writeSegment(store: ObjectStore, entries: readonly CheckpointEntry[]): Promise<SegmentRef>
+```
+
+Writes one segment (named by its content, so writing it again is harmless) and returns its reference.
+
+#### `writeHead`
+
+```ts
+export async function writeHead(store: ObjectStore, segments: readonly SegmentRef[], now: number): Promise<void>
+```
+
+Points the checkpoint at these segments. Written last, so a reader never sees a head whose segments are not there.
+
+#### `pruneSegments`
+
+```ts
+export async function pruneSegments(store: ObjectStore, keep: ReadonlySet<string>): Promise<number>
+```
+
+Removes segments the current head does not name and `keep` does not either (the segments this writer just named, in
+case another head was written meanwhile). A segment another writer names in a head written after this reads it is
+at worst re-read as missing: that reader then reads everything, and writes a checkpoint again.
+
+#### `dropCheckpoint`
+
+```ts
+export async function dropCheckpoint(store: ObjectStore): Promise<void>
+```
+
+Removes the checkpoint: the next start reads every layer and writes a new one.
+
+#### `CheckpointWriter`
+
+```ts
+export class CheckpointWriter
+```
+
+What a `ReportIndex` keeps to write its checkpoint: the closed segments already in the store, and the entries folded
+since (at most a segment's worth, so memory stays small). `flush` closes full segments, rewrites the open one and
+the head; it is called after a refresh, at most every `everyMs`, and does nothing when nothing changed.
+
+- `resume(loaded: LoadedCheckpoint, kept: ReadonlySet<string>): void` — Start from what was read: closed segments whose every layer is still in the report are named again unchanged; the rest of their layers (and the open segment's) are carried as open entries. `kept` says which marks took part.
+- `add(entry: CheckpointEntry): void` — A layer was folded. A full segment is written at once, so a first read of a large store never holds every layer.
+- `flush(force = false): Promise<void>` — Write what changed, if anything did and the last write is old enough (or `force`). Never throws: a failed write is logged and tried again later.
+
 ### The `atlas report` command
 
 Source: `packages/reports/src/report-cli.ts`. Import: `@crvouga/atlas/reports/report-cli`
@@ -7362,7 +7469,8 @@ result of every slot it fills, then dropped unless it still holds a winner, so m
 the age of the project. The winner rule is a total order, so folding is exact in any order and equals combining every layer
 from scratch (a test proves it over random partial runs). It also keeps what each layer sends (rows, JSON, a digest) until
 that layer changes, so taking in a result costs one layer, answers viewers a version hash, a cached JSON text and a delta,
-and tells listeners what arrived.
+and tells listeners what arrived. With a `checkpoint` store it keeps what folding each layer needs there, so a start reads
+tens of objects instead of two per layer, and the report it serves is still exactly the one every layer makes.
 
 See docs/report-contract.md
 See docs/server.md#performance
@@ -7415,6 +7523,7 @@ It reads only immutable layers (`layers/index/…`), which is what makes "read o
 - `accept(backendId: string, indexKey: string, known?: ReportLayer): Promise<void>` — Take in a layer an uploader has just written, from its catalog entry, without listing anything. Entries are read one after another; one already known is ignored. The regular refresh still reconciles the rest.
 - `onChange(listener: (change: IndexChange) => void): () => void` — Be told when the report changes. Returns how to stop.
 - `async start(intervalMs: number): Promise<void>` — Keep refreshing in the background. The first call returns once the first pass has finished.
+- `async restore(): Promise<number>` — The first pass, from the checkpoint when there is one: the whole catalog is listed (so what was deleted is left out and what is new is read), and each layer the checkpoint holds is folded from it instead of read. Then the checkpoint is written again if it changed. Without a checkpoint store it is a plain refresh. Returns how many layers came from it.
 - `stop(): void` — Stops the background refresh started by `start`. Safe to call twice.
 - `get ready(): boolean { return this.#refreshedAt > 0; }` — True once a first pass over the backends has finished, so `snapshot` is a report and not an empty guess.
 - `snapshot(): EffectiveEvidence` — The current report, ready to send. Built once per change, and only the layers that changed are rebuilt.
