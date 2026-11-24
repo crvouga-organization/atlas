@@ -8,8 +8,8 @@
  * too (`server/gc/runs/<id>/<project>/`), so a pass that stops or is killed is finished by the next step, never started
  * over, and never deletes more than one unbounded pass would. The time a pass judges ages against is fixed when it starts.
  *
- * Two instances could try to advance one pass at once: a lease in the pass record keeps them apart (the store has no
- * conditional writes, so the lease is written, then read back). What each batch found is written before it acts, so
+ * Two instances could try to advance one pass at once: Blob and S3 atomically claim a version of the pass record.
+ * Other stores confirm the lease by reading it back. What each batch found is written before it acts, so
  * even an overlap repeats idempotent work rather than deleting anything that is still used.
  *
  * @see docs/server.md#user-state-and-garbage-collection
@@ -17,8 +17,8 @@
 import { randomUUID } from 'node:crypto';
 
 import { planGarbage, stepGarbage, storeScratch, type GcPlan, type GcStep } from '../../reports/src/garbage';
-import { readUtf8, writeUtf8 } from '../../reports/src/object-io';
-import type { ObjectStore } from '../../reports/src/object-store';
+import { readBytes, readUtf8, writeUtf8 } from '../../reports/src/object-io';
+import { canWriteConditionally, type ObjectStore } from '../../reports/src/object-store';
 import type { GcPass, GcPolicy, GcRun } from '../../schema/src/user-state';
 
 /** Where passes are kept, beside the other server state. */
@@ -30,6 +30,8 @@ export const GC_LAST_RUNS = `${GC_PREFIX}last-runs.json`;
 const LEASE_SLACK_MS = 60_000;
 /** How many finished passes are kept for `GET /api/settings/gc/runs/{id}`. */
 const KEEP_FINISHED = 20;
+
+class LeaseChanged extends Error {}
 
 type Stored = GcPass & { readonly policy: GcPolicy; readonly nowMs: number; readonly projectList: readonly string[]; readonly lease?: { readonly owner: string; readonly until: number } | null };
 
@@ -90,8 +92,23 @@ export class GcPasses {
     return text === null ? null : JSON.parse(text) as Stored;
   }
 
-  async #write(pass: Stored): Promise<void> {
-    await writeUtf8(this.#options.store, `${GC_PREFIX}runs/${pass.id}.json`, JSON.stringify(pass), 'application/json');
+  async #versioned<T>(key: string): Promise<{ value: T; tag: string } | null> {
+    const object = await this.#options.store.get(key);
+    if (!object) return null;
+    const value = JSON.parse(new TextDecoder().decode(await readBytes(object.body))) as T;
+    if (!object.etag) throw new Error('The storage backend did not return a version for the collection pass.');
+    return { value, tag: object.etag };
+  }
+
+  async #write(pass: Stored, claim?: Stored | 'new'): Promise<void> {
+    const key = `${GC_PREFIX}runs/${pass.id}.json`;
+    const store = this.#options.store;
+    const text = JSON.stringify(pass);
+    if (!canWriteConditionally(store)) return writeUtf8(store, key, text, 'application/json');
+    const current = claim === 'new' ? null : await this.#versioned<Stored>(key);
+    if (claim !== 'new' && (!current || current.value.status !== 'running' ||
+        (claim ? JSON.stringify(current.value) !== JSON.stringify(claim) : current.value.lease?.owner !== this.#owner))) throw new LeaseChanged();
+    if (!await store.putConditional(key, new TextEncoder().encode(text), 'application/json', current?.tag ?? null)) throw new LeaseChanged();
   }
 
   /** A pass by its id, or null. */
@@ -119,7 +136,10 @@ export class GcPasses {
    * time the policy's ages are judged against is fixed now, so every step of the pass agrees on what is old enough.
    */
   async start(policy: GcPolicy, options: { readonly dryRun: boolean }): Promise<GcPass> {
-    const running = await this.current();
+    const store = this.#options.store;
+    const pointer = canWriteConditionally(store) ? await this.#versioned<{ id: string }>(CURRENT) : null;
+    const active = pointer ? await this.get(pointer.value.id) : null;
+    const running = canWriteConditionally(store) ? (active?.status === 'running' ? active : null) : await this.current();
     if (running) return running;
     const projects = [...await this.#options.projects()];
     const at = new Date(this.#now()).toISOString();
@@ -127,8 +147,14 @@ export class GcPasses {
       id: `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`, status: 'running', dryRun: options.dryRun, startedAt: at, updatedAt: at, finishedAt: null,
       progress: emptyProgress(projects.length), runs: [], policy, nowMs: this.#now(), projectList: projects, lease: null
     };
-    await this.#write(pass);
-    await writeUtf8(this.#options.store, CURRENT, JSON.stringify({ id: pass.id }), 'application/json');
+    await this.#write(pass, 'new');
+    const text = JSON.stringify({ id: pass.id });
+    if (canWriteConditionally(store)) {
+      if (!await store.putConditional(CURRENT, new TextEncoder().encode(text), 'application/json', pointer?.tag ?? null)) {
+        await store.delete(`${GC_PREFIX}runs/${pass.id}.json`);
+        return this.start(policy, options);
+      }
+    } else await writeUtf8(store, CURRENT, text, 'application/json');
     this.#options.log?.({ level: 'info', gc: 'start', pass: pass.id, dryRun: pass.dryRun, projects: projects.length });
     return publicPass(pass);
   }
@@ -159,8 +185,13 @@ export class GcPasses {
     const leaseFor = () => Math.min(Number.MAX_SAFE_INTEGER, (Number.isFinite(budgetMs) ? deadline : this.#tick() + 10 * 60_000) + LEASE_SLACK_MS);
     if (pass.lease && pass.lease.owner !== this.#owner && pass.lease.until > started) return publicPass(pass);
     // Claim it, then make sure the claim stuck: another instance may have claimed it at the same moment.
+    const prior = pass;
     pass = { ...pass, lease: { owner: this.#owner, until: leaseFor() } };
-    await this.#write(pass);
+    try { await this.#write(pass, prior); }
+    catch (error) {
+      if (error instanceof LeaseChanged) return publicPass((await this.#read(id)) ?? prior);
+      throw error;
+    }
     const confirmed = await this.#read(id);
     if (!confirmed || confirmed.lease?.owner !== this.#owner) return publicPass(confirmed ?? pass);
 
@@ -199,6 +230,7 @@ export class GcPasses {
         await this.#write(pass);
       }
     } catch (error) {
+      if (error instanceof LeaseChanged) return publicPass((await this.#read(id)) ?? pass);
       const message = error instanceof Error ? error.message : String(error);
       this.#options.log?.({ level: 'error', gc: 'pass', pass: id, error: message });
       // A store error leaves the pass running: the next step carries it on from what was already written.
@@ -249,7 +281,8 @@ export class GcPasses {
     const finished: Stored = { ...pass, status, finishedAt: at, updatedAt: at, lease: null, progress: { ...pass.progress, project: null, phase: null } };
     await this.#write(finished);
     Object.assign(pass, finished);
-    await this.#options.store.delete(CURRENT).catch(() => {});
+    // With atomic writes the next starter replaces this finished pointer against its version.
+    if (!canWriteConditionally(this.#options.store)) await this.#options.store.delete(CURRENT).catch(() => {});
     await storeScratch(this.#options.store, `${GC_PREFIX}runs/${pass.id}/`).clear().catch(() => {});
     if (!pass.dryRun && status === 'done') {
       this.#options.record?.(pass.runs);

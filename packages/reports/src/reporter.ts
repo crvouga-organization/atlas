@@ -13,7 +13,7 @@
 import { PublishChecksSchema, type PublishChecksInput } from '../../schema/src/layer';
 import { parseWith } from './parse-with';
 import type { ObjectStore } from './object-store';
-import { publishChecks } from './publish-checks';
+import { publishCheckLayers } from './publish-checks';
 
 type Check = PublishChecksInput['checks'][number];
 
@@ -100,10 +100,10 @@ export function createReporter(identity: ReporterIdentity, options: ReporterOpti
 
   async function send(batch: Batch): Promise<Error | null> {
     try {
-      const layer = await publishChecks(options.store, { ...identity, checks: batch.checks, recordedAtMs: batch.recordedAtMs });
-      layers += 1;
+      const pieces = await publishCheckLayers(options.store, { ...identity, checks: batch.checks, recordedAtMs: batch.recordedAtMs });
+      layers += pieces.length;
       sent += batch.checks.length;
-      options.onPublished?.({ id: layer.id, checks: batch.checks.length });
+      for (const layer of pieces) options.onPublished?.({ id: layer.id, checks: layer.parts[0]!.checks.length });
       return null;
     } catch (error) {
       return error instanceof Error ? error : new Error(String(error));

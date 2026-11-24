@@ -76,6 +76,7 @@ export const ServerInfoSchema = z.looseObject({
   slots: z.number().int().nonnegative(),
   capabilities: z.record(z.string(), z.boolean()).describe('Features this server has, by name: `events`, `ingest`, `store`, `checks`, `status`, `effective`. A client checks a name before using what it names'),
   uploads: z.looseObject({
+    gzipManifests: z.boolean().optional().describe('Accepts gzip-compressed manifest bytes in PUT requests with X-Atlas-Compression: gzip.'),
     directOverBytes: z.number().int().nonnegative().nullable().describe('Files larger than this go straight to storage (`POST /api/store/<key>?upload=start`, then `?upload=complete`); null when every upload goes through the server')
   }).optional().describe('How this server takes uploads. Absent from a server that predates it: every upload goes through it'),
   streamMaxSeconds: z.number().int().positive().nullable().optional().describe('The longest one /api/events stream lasts before the server ends it and the viewer reconnects; null or absent when streams last until the viewer leaves')

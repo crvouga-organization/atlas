@@ -6,15 +6,15 @@
  * only place user state is kept: not a file, not a database, not the browser. A missing object is an empty state
  * ("nothing chosen yet"); an object that cannot be read or does not match the schema is an error that stops the
  * server from starting and is never overwritten, so a transient or corrupt read can never silently reset anyone's choices.
- * Saving refuses a stale revision (the SHA-256 of the stored text), serialised within this process. An object store has
- * no conditional writes, so two servers saving at the same instant could still race; run one server per bucket.
+ * Saving refuses a stale revision (the SHA-256 of the stored text), serialised within this process. An object store supports
+ * optional conditional writes. Blob and S3 reject a concurrent change to the version this save read.
  *
  * @see docs/server.md#user-state-and-garbage-collection
  */
 import { createHash } from 'node:crypto';
 
-import { readUtf8, writeUtf8 } from '../../reports/src/object-io';
-import type { ObjectStore } from '../../reports/src/object-store';
+import { readBytes, writeUtf8 } from '../../reports/src/object-io';
+import { canWriteConditionally, type ObjectStore } from '../../reports/src/object-store';
 import { UserStateSchema, type UserState } from '../../schema/src/user-state';
 
 /** Where the user state lives, relative to the store (the bucket plus `ATLAS_S3_PREFIX`). */
@@ -48,9 +48,14 @@ const digest = (text: string) => createHash('sha256').update(text).digest('hex')
  */
 export function userStateStore(store: ObjectStore): UserStateStore {
   let pending: Promise<unknown> = Promise.resolve();
-  const read = async (): Promise<StoredUserState> => {
+  const read = async (): Promise<StoredUserState & { etag?: string }> => {
+    let etag: string | undefined;
     let text: string | null;
-    try { text = await readUtf8(store, USER_STATE_KEY); } catch (error) {
+    try {
+      const object = await store.get(USER_STATE_KEY);
+      etag = object?.etag;
+      text = object ? new TextDecoder().decode(await readBytes(object.body)) : null;
+    } catch (error) {
       throw new UserStateError(`The user state ${USER_STATE_KEY} could not be read from S3: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (text === null) return { state: { schemaVersion: 1 }, revision: digest(''), exists: false };
@@ -59,10 +64,10 @@ export function userStateStore(store: ObjectStore): UserStateStore {
     const parsed = UserStateSchema.safeParse(json);
     if (!parsed.success) throw new UserStateError(`The user state ${USER_STATE_KEY} in S3 is invalid (${parsed.error.issues.map(issue => `${issue.path.join('.') || '(document)'}: ${issue.message}`).join('; ')}). Atlas will not overwrite it: fix or delete that object, then restart.`);
     // The document as written, once it is known to be valid: defaults are not filled in, so a setting nobody chose stays unchosen.
-    return { state: json as UserState, revision: digest(text), exists: true };
+    return { state: json as UserState, revision: digest(text), exists: true, etag };
   };
   return {
-    read,
+    async read() { const { etag: _etag, ...state } = await read(); return state; },
     update(revision, change) {
       const run = pending.then(async () => {
         const held = await read();
@@ -71,7 +76,12 @@ export function userStateStore(store: ObjectStore): UserStateStore {
         const checked = UserStateSchema.safeParse(next);
         if (!checked.success) throw new UserStateError(checked.error.issues.map(issue => `${issue.path.join('.') || '(document)'}: ${issue.message}`).join('; '));
         const text = `${JSON.stringify(next, null, 2)}\n`;
-        await writeUtf8(store, USER_STATE_KEY, text, 'application/json');
+        if (canWriteConditionally(store)) {
+          if (held.exists && !held.etag) throw new UserStateError('The storage backend did not return a version for the saved settings.');
+          if (!await store.putConditional(USER_STATE_KEY, new TextEncoder().encode(text), 'application/json', held.etag ?? null)) {
+            throw new UserStateError('Settings changed. Reload them before saving.');
+          }
+        } else await writeUtf8(store, USER_STATE_KEY, text, 'application/json');
         return { state: next, revision: digest(text), exists: true };
       });
       pending = run.catch(() => undefined);

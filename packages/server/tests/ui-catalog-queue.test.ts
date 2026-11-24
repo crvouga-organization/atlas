@@ -643,3 +643,21 @@ describe('collectCatalog', () => {
     expect(queue.tiers.empty).toBe(9);
   });
 });
+
+test('two serverless workers cannot reserve the same unit on a shared Blob store', async () => {
+  const { fakeVercelBlob } = await import('../../reports/tests/fake-vercel-blob');
+  const { vercelBlobStore } = await import('../../reports/src/vercel-blob-store');
+  const blob = fakeVercelBlob();
+  const workers = await Promise.all([0, 1].map(async () => {
+    const store = vercelBlobStore({ ...blob.options, fetch: blob.fetch });
+    const server = createAtlasServer({ backends: [{ id: 'store', store }], write: 'store', tokens: TOKENS, refreshOnRequestMs: 1000 });
+    servers.push(server);
+    await server.ready;
+    return (path: string, init: RequestInit = {}) => server.fetch(new Request('http://atlas.test' + path, init));
+  }));
+  const catalog = await publishDefinition(workers[0]!, definition(1));
+  const replies = await Promise.all(workers.map((call, i) => claim(call, { definition: catalog.version, batchSize: 1, shard: String(i) })));
+  const units = replies.flatMap(reply => reply.claim?.units.map(unit => unit.key) ?? []);
+  expect(units.length).toBeGreaterThan(0);
+  expect(new Set(units).size).toBe(units.length);
+});

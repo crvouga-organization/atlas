@@ -525,9 +525,10 @@ Responses: `200` Already there with the same bytes.; `201` Stored.; `401` No tok
 
 For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.
 
-1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
+For a manifest PUT, a server advertising `uploads.gzipManifests` accepts `X-Atlas-Compression: gzip` and validates the decompressed manifest against its size limit.
+1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…", "sha256": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
 2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).
-3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
+3. `POST /api/store/<key>?upload=complete`. If start returned `staged: true`, repeat the start body. The server verifies staged bytes before creating the destination. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
 
 Only files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.
 
@@ -543,9 +544,10 @@ Responses: `200` `start`: where to send the bytes, or that the blob is already t
 
 For a server on a host that refuses large request bodies (serverless functions): `GET /api/server` says `uploads.directOverBytes`, and a file larger than that is not sent through the server.
 
-1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
+For a manifest PUT, a server advertising `uploads.gzipManifests` accepts `X-Atlas-Compression: gzip` and validates the decompressed manifest against its size limit.
+1. `POST /api/store/<key>?upload=start` with `{ "size": <bytes>, "contentType": "…", "sha256": "…" }`. The answer is `{ "exists": true }` for a blob already stored (send nothing), or `{ "exists": false, "method": "PUT", "url": …, "headers": …, "expiresAt": … }`: a request good for this one key, size and type for a few minutes.
 2. Make that request with the bytes, to the storage itself, with exactly those headers (never the Atlas token).
-3. `POST /api/store/<key>?upload=complete`. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
+3. `POST /api/store/<key>?upload=complete`. If start returned `staged: true`, repeat the start body. The server verifies staged bytes before creating the destination. The server checks what arrived exactly as it checks an upload; what fails is deleted and answered `422`.
 
 Only files go this way: blobs (`layers/blobs/<sha256>.gz`) and the files of a run. Manifests and catalog entries, which make something visible, always go through the server. A server without direct uploads answers `404`: upload with `PUT`.
 

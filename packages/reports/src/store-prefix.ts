@@ -5,6 +5,7 @@
  * partitioned by prefix, and prefixes compose. It guards the keys it is given (no leading `/`, no `..`) so a scoped
  * store cannot reach outside its prefix by key.
  */
+import { canWriteConditionally, type ConditionalWrites, canStage, type StagedUploads } from './object-store';
 import type { ObjectStore, PagedListing, SignedDownloads, StoredObject } from './object-store';
 import { assertLogicalObjectKey } from './namespace-guard';
 
@@ -46,9 +47,22 @@ export class ObjectStoreWithPrefix implements ObjectStore {
         return { keys: page.keys.map(key => key.slice(this.prefix.length)), next: page.next === null ? null : page.next.slice(this.prefix.length) };
       };
     }
+    if (canWriteConditionally(inner)) this.putConditional = (key, bytes, type, tag) => inner.putConditional(this.scopedKey(key), bytes, type, tag);
+    if (canStage(inner)) {
+      this.stagedUploadTarget = (key, upload) => inner.stagedUploadTarget(this.scopedKey(key), upload);
+      this.putIfAbsent = (key, bytes, type) => inner.putIfAbsent(this.scopedKey(key), bytes, type);
+    }
     const sign = (inner as Partial<SignedDownloads>).signedUrl;
     if (sign) this.signedUrl = (key, options) => sign.call(inner, this.scopedKey(key), options);
   }
+
+  /** Compare and write within this prefix when the underlying store supports it. */
+  putConditional?: ConditionalWrites['putConditional'];
+
+  /** Signed staging under this project prefix when supported by the underlying store. */
+  stagedUploadTarget?: StagedUploads['stagedUploadTarget'];
+  /** Atomically create a validated destination under this project prefix. */
+  putIfAbsent?: StagedUploads['putIfAbsent'];
 
   private scopedKey(key: string): string {
     assertLogicalObjectKey(key);

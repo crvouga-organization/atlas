@@ -23,7 +23,8 @@ const scopeStore = (store: ObjectStore, slug: string) => typeof (store as Partia
 
 /** Wrap the single-project protocol in project selection. Auth, upload validation and composition stay identical. */
 export function projectServer(options: AtlasServerOptions, create: (options: AtlasServerOptions) => AtlasServer): AtlasServer {
-  const base = create(options);
+  const projectOptions = { ...options, pollProjects: () => discover() };
+  const base: AtlasServer = create(projectOptions);
   const auth = createAuth(options.tokens ?? [], options.anonymousRead ?? false, options.trust);
   const write = options.backends.find(backend => backend.id === options.write)!.store;
   const registry = options.liveStore ?? write;
@@ -66,7 +67,7 @@ export function projectServer(options: AtlasServerOptions, create: (options: Atl
     if (child) return child;
     expire();
     if (children.size >= 64) return null;
-    child = { touched: Date.now(), pending: 0, server: create({ ...options,
+    child = { touched: Date.now(), pending: 0, server: create({ ...projectOptions,
       ...(options.log ? { log: line => options.log!({ ...line, project: slug }) } : {}),
       backends: options.backends.map(backend => ({ ...backend, store: scopeStore(backend.store, slug) })),
       ...(options.liveStore ? { liveStore: scopeStore(options.liveStore, slug) } : {}), site: undefined, settings: undefined, gc: undefined

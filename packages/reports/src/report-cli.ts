@@ -28,7 +28,8 @@ import { loadDirectoryOutline } from './directory-outline';
 import { iamPolicy, inspectStore, type Check, type Role } from './doctor';
 import { checksFromCtrf, checksFromJunit, checksFromManifest, type IngestedChecks } from './ingest';
 import { parseWith } from './parse-with';
-import { publishChecks } from './publish-checks';
+import { recordingReceipt } from './recording-receipt';
+import { publishCheckLayers } from './publish-checks';
 import { createReporter } from './reporter';
 import { formatStatusMarkdown, formatStatusText, reportStatus } from './report-status';
 import { verifyStoreRecordings, type RecordingGap } from './recording-verify';
@@ -287,10 +288,12 @@ export async function reportMain(argv: readonly string[], io: ReportIo = { out: 
     const budget = { remaining: Number(value(rest, 'max-total-attachment-mb') ?? 2048) * 1024 * 1024 };
     const warnings: string[] = [];
     let attachedFiles = 0, attachedBytes = 0;
+    const attachmentCounts = new Map<string, { files: number; bytes: number }>();
     const checksWithFiles: unknown[] = [];
     for (const check of linked.checks) {
       const read = await readAttachmentFiles(check as never, roots, { maxBytes, budget });
       checksWithFiles.push(read.value);
+      attachmentCounts.set(check.id, { files: read.attached, bytes: read.bytes });
       attachedFiles += read.attached; attachedBytes += read.bytes; warnings.push(...read.warnings);
     }
     const fromFile = await readAttachmentFiles({ attachments: (extra.attachments as Record<string, unknown>[] | undefined) ?? [] }, roots, { maxBytes, budget });
@@ -300,7 +303,7 @@ export async function reportMain(argv: readonly string[], io: ReportIo = { out: 
     const labels = { ...(ingested.labels ?? {}), ...((extra.labels as Record<string, string> | undefined) ?? {}), ...Object.fromEntries(values(rest, 'label').map(pair => keyValue(pair, '--label'))) };
     const links = [...((extra.links as unknown[] | undefined) ?? []), ...values(rest, 'link').map(linkSpec)];
     const execution = executionOf(rest, env, extra.run);
-    const layer = await publishChecks(target.store, {
+    const layers = await publishCheckLayers(target.store, {
       ...extra,
       producer,
       checks: checksWithFiles as never,
@@ -319,25 +322,40 @@ export async function reportMain(argv: readonly string[], io: ReportIo = { out: 
       ...(value(rest, 'environment') ?? extra.environment ? { environment: (value(rest, 'environment') ?? extra.environment) as string } : {}),
       parameters: { ...((extra.parameters as Record<string, string> | undefined) ?? {}), ...parameters }
     });
+    const layer = layers[0]!;
     const counts = { passed: 0, failed: 0, other: 0 };
     for (const check of ingested.checks) counts[check.status === 'passed' ? 'passed' : check.status === 'failed' ? 'failed' : 'other'] += 1;
     const linkedCount = linked.checks.filter(check => check.specPath).length;
     const hint = linkedCount < linked.checks.length && !value(rest, 'spec') && !specsDirectory ? ' (pass --specs <dir> or --spec <path> to link checks to their specs)' : '';
     const json = wantsJson(rest);
-    const result: { ok: boolean; store: string; layer: object; specSet?: object; run?: object; recordings?: object; warnings: string[] } = {
-      ok: true, store: target.label,
-      layer: { id: layer.id, producer, environment: layer.environment ?? null, checks: ingested.checks.length, passed: counts.passed, failed: counts.failed, notRun: counts.other, linkedToSpec: linkedCount, ...(freshness ? { freshness } : {}), attachmentFiles: attachedFiles, attachmentBytes: attachedBytes, ...(layer.recordings ? { recordings: layer.recordings } : {}) },
+    const documents = layers.map(piece => {
+      const checks = piece.parts[0]!.checks;
+      let files = fromFile.attached + fromFlags.attached, bytes = fromFile.bytes + fromFlags.bytes;
+      for (const check of checks) {
+        const captured = attachmentCounts.get(check.id)!;
+        files += captured.files;
+        bytes += captured.bytes;
+      }
+      const passed = checks.filter(check => check.status === 'passed').length;
+      const failed = checks.filter(check => check.status === 'failed').length;
+      return { id: piece.id, producer, environment: piece.environment ?? null, checks: checks.length, passed, failed,
+        notRun: checks.length - passed - failed, linkedToSpec: checks.filter(check => check.specPath).length,
+        ...(freshness ? { freshness } : {}), attachmentFiles: files, attachmentBytes: bytes, ...(piece.recordings ? { recordings: piece.recordings } : {}) };
+    });
+    const result: { ok: boolean; store: string; layer: object; layers?: object[]; specSet?: object; run?: object; recordings?: object; warnings: string[] } = {
+      ok: true, store: target.label, layer: documents[0]!, ...(layers.length > 1 ? { layers: documents } : {}),
       warnings: warnings.map(warning => `attachment skipped: ${warning}`)
     };
-    if (!json) io.out(`Published layer ${layer.id.slice(0, 12)}: ${ingested.checks.length} checks (${counts.passed} passed, ${counts.failed} failed, ${counts.other} not run) as "${producer}"${layer.environment ? ` on ${layer.environment}` : ''}${freshness === 'modified' ? ' [from a modified checkout]' : ''}; ${linkedCount} of ${linked.checks.length} linked to a spec${hint}${attachedFiles ? `; ${attachedFiles} attachment file${attachedFiles === 1 ? '' : 's'} (${(attachedBytes / 1024 / 1024).toFixed(1)} MiB)` : ''}\n`);
+    if (!json) io.out(`Published ${layers.length > 1 ? layers.length + ' layers' : 'layer ' + layer.id.slice(0, 12)}: ${ingested.checks.length} checks (${counts.passed} passed, ${counts.failed} failed, ${counts.other} not run) as "${producer}"${layer.environment ? ` on ${layer.environment}` : ''}${freshness === 'modified' ? ' [from a modified checkout]' : ''}; ${linkedCount} of ${linked.checks.length} linked to a spec${hint}${attachedFiles ? `; ${attachedFiles} attachment file${attachedFiles === 1 ? '' : 's'} (${(attachedBytes / 1024 / 1024).toFixed(1)} MiB)` : ''}\n`);
     if (!json) for (const warning of warnings) io.out(`! attachment skipped: ${warning}\n`);
     // Recording completeness is reported apart from the checks' results. Only --require-recordings turns a gap into a failing exit.
-    const gaps = (layer.recordings?.items ?? []).filter(item => item.state !== 'uploaded' && item.state !== 'referenced' && item.state !== 'not-applicable');
+    const recordings = layers.length === 1 ? layer.recordings : recordingReceipt(layers.flatMap(piece => piece.parts[0]!.checks) as unknown as Record<string, unknown>[]);
+    const gaps = (recordings?.items ?? []).filter(item => item.state !== 'uploaded' && item.state !== 'referenced' && item.state !== 'not-applicable');
     const strict = rest.includes('--require-recordings');
-    if (layer.recordings) {
-      result.recordings = { strict, complete: gaps.length === 0, expected: layer.recordings.expected, uploaded: layer.recordings.uploaded, gaps: gaps.map(({ check, state, reason }) => ({ check, state, ...(reason ? { reason } : {}) })) };
+    if (recordings) {
+      result.recordings = { strict, complete: gaps.length === 0, expected: recordings.expected, uploaded: recordings.uploaded, gaps: gaps.map(({ check, state, reason }) => ({ check, state, ...(reason ? { reason } : {}) })) };
       if (!json) {
-        io.out(`Recordings: ${layer.recordings.uploaded + layer.recordings.referenced} of ${layer.recordings.expected} expected published${layer.recordings.notApplicable ? `, ${layer.recordings.notApplicable} not applicable` : ''}\n`);
+        io.out(`Recordings: ${recordings.uploaded + recordings.referenced} of ${recordings.expected} expected published${recordings.notApplicable ? `, ${recordings.notApplicable} not applicable` : ''}\n`);
         for (const gap of gaps) io.out(`! recording ${gap.state}: ${gap.check}${gap.reason ? ` (${gap.reason})` : ''}\n`);
       }
       if (strict && gaps.length) result.ok = false;

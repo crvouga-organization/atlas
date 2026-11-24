@@ -99,8 +99,7 @@ In code, `vercelBlobStore` from `@crvouga/atlas/reports/vercel-blob-store` is th
 
 Atlas calls the Blob HTTP API with `fetch`, without the `@vercel/blob` SDK, the same way it talks to S3. Objects are
 written **private**, under their exact keys (no random suffix, overwriting the same bytes on a retry), and read back
-with the token, past the CDN cache, so an overwrite is seen at once. Atlas never hands out a URL to a Blob object:
-`getUri` answers `null`. The store must be private; a public store refuses Atlas's writes.
+with the token, past the CDN cache, so an overwrite is seen at once. The store adapter’s `getUri` signs a read URL for one object for up to five minutes. The store must be private; a public store refuses Atlas's writes.
 
 To move an existing deployment's layers into Blob, merge them: the report read from Blob is then the same.
 
@@ -267,19 +266,36 @@ What changes on a function host, and what does not:
   ([details](server.md#or-a-vercel-blob-store)). Every instance reads the same store and only caches it, so any number of
   them show the same report.
 - **No timers.** A request looks at the store when the last look is older than `ATLAS_REFRESH_SECONDS`. The daily
-  `/api/cron` run (Vercel Cron, with `CRON_SECRET`; or the admin token) applies a saved garbage collection policy when it is due.
+  `/api/cron` run authenticates with `CRON_SECRET` or an admin token and applies the active retention policy when due.
+  A cold start lists catalog keys to reconcile deletions and backdated imports, then reads layer contents for entries
+  missing from its checkpoint. Report reads on warm instances check for uploads acknowledged by another instance.
 - **Large files go straight to Blob.** A function accepts about 4.5 MB per request, so `GET /api/server` says
   `uploads.directOverBytes` (4 MiB; `ATLAS_DIRECT_UPLOAD_OVER_BYTES`). A publisher sends larger files to Blob with a
-  one-time token good for that one key, size and type, and the server checks what arrived as it checks any upload.
+  short-lived token for one key, size limit and type. Current publishers send the bytes to a private staging key on Blob or S3.
+  Completion verifies the declared hash, size and type before creating the immutable destination. Configure an S3
+  lifecycle rule to expire abandoned objects under each project's `server/uploads/` prefix.
+- When the server advertises `uploads.gzipManifests`, the HTTP publisher compresses large manifests that shrink.
+  If the host still returns HTTP 413, `atlas report publish --checks` splits the checks across immutable layers.
+  Its JSON result then includes each piece in `layers`, with the first piece also in `layer`. A single check that
+  exceeds the limit fails the publication.
 - **Recordings play from Blob.** A browser playing or downloading a run's video, audio or trace zip is sent to the Blob
   store with a URL that works for five minutes, after its read access was checked, so seeking through a long video costs
   the function nothing. Pages, SVG, images and anything requested by a script still come through the function, sandboxed.
   `ATLAS_REDIRECT_DOWNLOADS=0` keeps every byte in the function. Attachments of test results are packed into compressed
   chunks of several files each, so they are always served by the function.
+- Serverless live-run requests read their lease from storage. Conditional writes reserve a sequence before publication, so a cold instance can resume a retry and competing progress messages cannot both win.
 - **Live updates** come over a stream the server ends after 4 minutes (`ATLAS_STREAM_MAX_SECONDS`), before the
   function's time limit; the viewer reconnects by itself.
 - The template builds the viewer into `public/` with `--api-base /api`. Vercel serves the viewer and its assets from the CDN. API calls, probes and the settings page reach the function.
 - **Protected deployment check.** Enable Vercel Authentication for the production domain and set `ATLAS_ANONYMOUS_READ=1`. In a signed-out browser open both `/` and `/api/server` and confirm Vercel requests sign-in. In a signed-in browser open a report. Publish from CI with the automation bypass header and verify the result appears. See [Deployment Protection](https://vercel.com/docs/deployment-protection) and [automation bypass](https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/protection-bypass-automation).
+
+The template's upload threshold fits Vercel's default request limit. Streamed responses are exempt from the response
+size limit and remain subject to the function's duration. The daily cron schedule fits the Hobby plan.
+[Function limits](https://vercel.com/docs/functions/limitations) and [cron frequency by plan](https://vercel.com/docs/cron-jobs/usage-and-pricing).
+
+Atlas bypasses the private Blob CDN cache when reading mutable state and uses ETags for conditional writes. For current
+multipart limits, operation quotas and SDK options, see [private storage consistency](https://vercel.com/docs/vercel-blob/private-storage#consistent-reads),
+[Blob SDK operations](https://vercel.com/docs/vercel-blob/using-blob-sdk) and [Blob usage limits](https://vercel.com/docs/vercel-blob/usage-and-pricing).
 - **Publishing from CI** needs no token: the template trusts the GitHub account it was deployed into ([trusted
   publishing](server.md#trusted-publishing)). On a protected production domain, pass the Vercel automation bypass secret in `ATLAS_HEADERS` as well.
 - **Updates are automatic.** Dependabot proposes each release and the template's workflow merges minor and patch ones;

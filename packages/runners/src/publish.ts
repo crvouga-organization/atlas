@@ -48,19 +48,28 @@ async function sendChecks(runner: string, checks: readonly EvidenceCheck[], opti
   target.pathname = `${target.pathname.replace(/\/$/, '')}/api/checks`;
   // No token: from GitHub Actions with id-token: write, the job's identity is the credential (trusted publishing).
   const token = await bearerFor(url, options.token ?? process.env.ATLAS_PUBLISH_TOKEN ?? process.env.ATLAS_TOKEN);
-  const response = await fetch(target, {
-    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
-    headers: { ...processHeaders(), 'content-type': 'application/json', ...((options.project ?? process.env.ATLAS_PROJECT) ? { 'x-atlas-project': options.project ?? process.env.ATLAS_PROJECT! } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) },
-    body: JSON.stringify({ producer: options.producer ?? runner, recordedAtMs: options.recordedAtMs ?? Date.now(),
-      environment: options.environment ?? process.env.ATLAS_ENVIRONMENT,
-      branch: options.branch ?? process.env.ATLAS_BRANCH, sha: options.sha ?? process.env.ATLAS_SHA,
-      ...(live ? { run: { id: live.id } } : {}), checks: uniqueChecks(checks) })
-  });
-  if (!response.ok) { await response.body?.cancel(); throw new Error(`Atlas reporter: upload refused (HTTP ${response.status})`); }
-  if (live?.compact && live.finishedAtMs !== undefined) {
-    const { id } = await response.json() as { id: string };
-    await live.compact(id);
-  } else await response.body?.cancel();
+  const headers = { ...processHeaders(), 'content-type': 'application/json', ...((options.project ?? process.env.ATLAS_PROJECT) ? { 'x-atlas-project': options.project ?? process.env.ATLAS_PROJECT! } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) };
+  const metadata = { producer: options.producer ?? runner, recordedAtMs: options.recordedAtMs ?? Date.now(),
+    environment: options.environment ?? process.env.ATLAS_ENVIRONMENT,
+    branch: options.branch ?? process.env.ATLAS_BRANCH, sha: options.sha ?? process.env.ATLAS_SHA,
+    ...(live ? { run: { id: live.id } } : {}) };
+  const finalIds: string[] = [];
+  async function publish(batch: readonly EvidenceCheck[]): Promise<void> {
+    const response = await fetch(target, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
+      headers, body: JSON.stringify({ ...metadata, checks: batch }) });
+    if (response.status === 413 && batch.length > 1) {
+      await response.body?.cancel();
+      const middle = Math.ceil(batch.length / 2);
+      await publish(batch.slice(0, middle));
+      await publish(batch.slice(middle));
+      return;
+    }
+    if (!response.ok) { await response.body?.cancel(); throw new Error(`Atlas reporter: upload refused (HTTP ${response.status})`); }
+    if (live?.compact && live.finishedAtMs !== undefined) finalIds.push((await response.json() as { id: string }).id);
+    else await response.body?.cancel();
+  }
+  await publish(uniqueChecks(checks));
+  if (finalIds.length) await live?.compact?.(finalIds[0]!, finalIds.slice(1));
 }
 
 /** Start the native runner's live feed with the same endpoint and identity as its final report. */

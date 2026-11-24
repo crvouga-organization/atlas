@@ -3,6 +3,8 @@
  * DELETE and ListObjectsV2), checks the access key in the SigV4 `Authorization` header and the bucket name, and answers
  * like S3 does when either is wrong. It cannot prove that real S3 accepts the signature: the S3 integration tests do that.
  */
+import { createHash } from 'node:crypto';
+
 export const S3_TEST_ENV = {
   ATLAS_S3_ENDPOINT: 'http://s3.test', ATLAS_S3_BUCKET: 'atlas-test', ATLAS_S3_REGION: 'us-east-1',
   ATLAS_S3_ACCESS_KEY_ID: 'testkey', ATLAS_S3_SECRET_ACCESS_KEY: 'testsecret'
@@ -37,15 +39,20 @@ export function fakeS3(options: { bucket?: string; accessKey?: string } = {}) {
       const body = `<?xml version="1.0"?><ListBucketResult><IsTruncated>${keys.length > max}</IsTruncated>${page.map(item => `<Contents><Key>${encodeURIComponent(item).replace(/%2F/g, '/')}</Key></Contents>`).join('')}</ListBucketResult>`;
       return new Response(body, { headers: { 'content-type': 'application/xml' } });
     }
+    const tag = (bytes: Uint8Array) => '"' + createHash('md5').update(bytes).digest('hex') + '"';
     if (method === 'PUT') {
-      objects.set(key, { bytes: new Uint8Array(await request.arrayBuffer()), contentType: headers.get('content-type') ?? 'application/octet-stream' });
+      const bytes = new Uint8Array(await request.arrayBuffer());
+      const current = objects.get(key);
+      if ((headers.get('if-none-match') === '*' && current) ||
+          (headers.has('if-match') && (!current || headers.get('if-match') !== tag(current.bytes)))) return xmlError(412, 'PreconditionFailed');
+      objects.set(key, { bytes, contentType: headers.get('content-type') ?? 'application/octet-stream' });
       return new Response(null, { status: 200 });
     }
     if (method === 'DELETE') { objects.delete(key); return new Response(null, { status: 204 }); }
     const found = objects.get(key);
     if (!found) return method === 'HEAD' ? new Response(null, { status: 404 }) : xmlError(404, 'NoSuchKey');
-    if (method === 'HEAD') return new Response(null, { status: 200, headers: { 'content-length': String(found.bytes.length), 'content-type': found.contentType } });
-    return new Response(new Uint8Array(found.bytes), { headers: { 'content-type': found.contentType, 'content-length': String(found.bytes.length) } });
+    if (method === 'HEAD') return new Response(null, { status: 200, headers: { etag: tag(found.bytes), 'content-length': String(found.bytes.length), 'content-type': found.contentType } });
+    return new Response(new Uint8Array(found.bytes), { headers: { etag: tag(found.bytes), 'content-type': found.contentType, 'content-length': String(found.bytes.length) } });
   }) as typeof fetch;
   return { fetch: fetchImpl, objects, requests, bucket,
     text: (key: string) => { const found = objects.get(key); return found ? new TextDecoder().decode(found.bytes) : null; } };

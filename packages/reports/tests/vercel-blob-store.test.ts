@@ -39,11 +39,17 @@ describe('vercelBlobStore', () => {
     expect(blob.requests.filter(request => request.url.includes('.blob.vercel-storage.com')).every(request => request.url.endsWith('?cache=0'))).toBe(true);
   });
 
-  test('never hands out a URL: getUri is null for present and missing keys', async () => {
+  test('getUri signs only the requested private object for at most five minutes', async () => {
     const blob = fakeVercelBlob();
     const store = vercelBlobStore({ ...blob.options, fetch: blob.fetch });
     await store.put('a.txt', text('a'), 'text/plain');
-    expect(await store.getUri('a.txt')).toBeNull();
+    const url = new URL((await store.getUri('a.txt'))!);
+    const until = Number(url.searchParams.get('vercel-blob-valid-until'));
+    expect(until).toBeGreaterThan(Date.now());
+    expect(until).toBeLessThanOrEqual(Date.now() + 300_000);
+    expect(await (await blob.fetch(url.href)).text()).toBe('a');
+    url.search = '';
+    expect((await blob.fetch(url.href)).ok).toBe(false);
     expect(await store.getUri('missing.txt')).toBeNull();
   });
 

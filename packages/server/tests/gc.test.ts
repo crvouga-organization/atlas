@@ -280,6 +280,23 @@ describe('garbage collection passes', () => {
     expect(effective.layers.length).toBe(1);
   });
 
+  test('concurrent bounded workers share one pass and preserve the winning layer', async () => {
+    const s3 = fakeS3();
+    await layersOf(storeOn(s3), [1, 2, 3, 4]);
+    const workers = await Promise.all([setup({ s3, gcBudgetMs: 0 }), setup({ s3, gcBudgetMs: 0 })]);
+    await workers[0]!.save(POLICY);
+    const start = await Promise.all(workers.map(async worker => (await (await worker.call('POST', '/api/settings/gc/run')).json()) as Pass));
+    const id = start[0]!.id;
+    expect(start[1]!.id).toBe(id);
+    let pass = start[0]!;
+    for (let attempt = 0; attempt < 50 && pass.status === 'running'; attempt++) {
+      const states = await Promise.all(workers.map(async worker => (await (await worker.call('GET', `/api/settings/gc/runs/${id}`)).json()) as Pass));
+      pass = states.find(state => state.status === 'done') ?? states[0]!;
+    }
+    expect(pass).toMatchObject({ status: 'done', runs: [{ deletedLayers: 3 }] });
+    expect(await workers[0]!.layerKeys()).toHaveLength(1);
+  });
+
   test('a scheduled pass on a bounded host carries on a pass that is under way', async () => {
     const { save, app, layerKeys } = await setup({ gcBudgetMs: 0, days: [1, 2, 3, 4, 5] });
     await save(POLICY);

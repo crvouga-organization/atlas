@@ -146,6 +146,12 @@ jobs:
           ATLAS_TEST_S3_SECRET: atlassecret
         run: bun test packages/reports/tests/s3-store.integration.test.ts packages/reports/tests/s3-flow.integration.test.ts
 
+      - name: Check private Blob storage when a test store is configured
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          ATLAS_TEST_BLOB_TOKEN: ${{ secrets.ATLAS_TEST_BLOB_TOKEN }}
+        run: bun test packages/reports/tests/vercel-blob-store.integration.test.ts
+
   # The todo example, run for real: once in a single browser and once across a phone, a desktop and
   # a server. The two runs share nothing, so each gets its own job.
   example:
