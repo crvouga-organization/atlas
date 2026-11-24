@@ -287,9 +287,8 @@ What changes on a function host, and what does not:
   banner that names what to set. A deployment with neither tokens nor trusted publishers refuses to serve, so it is
   never open to the world.
 
-The settings page at `/admin` needs Bun's bundler, which a Node function does not have. There it explains how to
-save a garbage collection policy through the API (`PUT /api/settings/gc` with the admin token), and settings come from
-environment variables.
+The settings page at `/admin` works here too: `atlas client build` (the template's build step) prebuilds it into the
+site, so the function serves it without bundling anything at runtime.
 
 ### A process of its own
 
