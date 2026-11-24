@@ -6,7 +6,8 @@
  * the age of the project. The winner rule is a total order, so folding is exact in any order and equals combining every layer
  * from scratch (a test proves it over random partial runs). It also keeps what each layer sends (rows, JSON, a digest) until
  * that layer changes, so taking in a result costs one layer, answers viewers a version hash, a cached JSON text and a delta,
- * and tells listeners what arrived.
+ * and tells listeners what arrived. With a `checkpoint` store it keeps what folding each layer needs there, so a start reads
+ * tens of objects instead of two per layer, and the report it serves is still exactly the one every layer makes.
  *
  * @see docs/report-contract.md
  * @see docs/server.md#performance
@@ -24,6 +25,8 @@ import type { ReportLayer } from './layer-types';
 import { isPaged } from './object-store';
 import type { SpecEntry } from './explorer-types';
 import { TestHistory } from './test-catalog';
+import { CheckpointWriter, readCheckpoint, type CheckpointEntry, type LoadedCheckpoint } from './report-checkpoint';
+import type { ObjectStore } from './object-store';
 
 /** What a viewer needs to show the report, and nothing that is only history. */
 export type EffectiveEvidence = {
@@ -98,9 +101,24 @@ export class ReportIndex {
   #passes = 0;
   /** Layers handed over by an uploader, read one at a time in the order they came. */
   #accepting: Promise<void> = Promise.resolve();
+  readonly #checkpointStore: ObjectStore | undefined;
+  readonly #writer: CheckpointWriter | undefined;
+  /** While the first pass reads the catalog: what the checkpoint already holds, by mark. Dropped after it. */
+  #cache: Map<string, CheckpointEntry> | null = null;
+  readonly #log: ((line: Record<string, unknown>) => void) | undefined;
 
-  constructor(backends: readonly BackendInput[], options: { readonly concurrency?: number; readonly now?: () => number; /** Look at the whole catalog every this many refreshes; in between only its newest page. Default 30. */ readonly fullListEvery?: number; /** Leave layers out of the report, as a gate on `main` does. */ readonly include?: (layer: LayerHeader) => boolean } = {}) {
+  constructor(backends: readonly BackendInput[], options: {
+    readonly concurrency?: number; readonly now?: () => number; /** Look at the whole catalog every this many refreshes; in between only its newest page. Default 30. */ readonly fullListEvery?: number; /** Leave layers out of the report, as a gate on `main` does. */ readonly include?: (layer: LayerHeader) => boolean;
+    /**
+     * Keep a checkpoint in this store (`server/checkpoint/v1/`): `start` reads it instead of every layer, and changes are
+     * written back at most every `checkpointEveryMs` (default 5 minutes). The report is the same with or without it.
+     */
+    readonly checkpoint?: ObjectStore; readonly checkpointEveryMs?: number; readonly log?: (line: Record<string, unknown>) => void;
+  } = {}) {
     this.#backends = backends;
+    this.#log = options.log;
+    this.#checkpointStore = options.checkpoint;
+    this.#writer = options.checkpoint ? new CheckpointWriter({ store: options.checkpoint, ...(options.now ? { now: options.now } : {}), ...(options.checkpointEveryMs !== undefined ? { everyMs: options.checkpointEveryMs } : {}), ...(options.log ? { log: options.log } : {}) }) : undefined;
     this.#include = options.include ?? (() => true);
     this.#fullListEvery = Math.max(1, options.fullListEvery ?? 30);
     this.#concurrency = options.concurrency ?? 64;
@@ -135,6 +153,7 @@ export class ReportIndex {
       if (this.#folded.has(mark)) return;
       await this.#load(backend, indexKey, known);
       this.#emit();
+      await this.#writer?.flush();
     }).catch(() => {});
     return this.#accepting;
   }
@@ -160,9 +179,37 @@ export class ReportIndex {
 
   /** Keep refreshing in the background. The first call returns once the first pass has finished. */
   async start(intervalMs: number): Promise<void> {
-    await this.refresh();
+    await this.restore();
     this.#timer = setInterval(() => { void this.refresh().catch(() => {}); }, intervalMs);
     (this.#timer as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * The first pass, from the checkpoint when there is one: the whole catalog is listed (so what was deleted is left out
+   * and what is new is read), and each layer the checkpoint holds is folded from it instead of read. Then the checkpoint
+   * is written again if it changed. Without a checkpoint store it is a plain refresh. Returns how many layers came from it.
+   */
+  async restore(): Promise<number> {
+    let loaded: LoadedCheckpoint | null = null;
+    if (this.#checkpointStore && this.#passes === 0) {
+      const read = await readCheckpoint(this.#checkpointStore).catch(error => ({ error: String(error) }));
+      if (read && 'error' in read) this.#log?.({ level: 'warn', checkpoint: 'ignored', reason: read.error });
+      else if (read) { loaded = read; this.#cache = read.entries; }
+    }
+    let used = 0;
+    try {
+      await this.refresh();
+    } finally {
+      if (loaded) {
+        const kept = new Set([...loaded.entries.keys()].filter(mark => this.#folded.has(mark)));
+        used = kept.size;
+        this.#writer!.resume(loaded, kept);
+      }
+      this.#cache = null;
+    }
+    // Written now, not later: on a host that freezes between requests, later may never come.
+    await this.#writer?.flush(true);
+    return used;
   }
 
 /** Stops the background refresh started by `start`. Safe to call twice. */
@@ -212,11 +259,20 @@ export class ReportIndex {
     }));
     this.#refreshedAt = this.#now();
     this.#emit();
+    if (this.#cache === null) await this.#writer?.flush();
     return this.#rev !== before;
   }
 
   async #load(backend: BackendInput, key: string, known?: ReportLayer): Promise<void> {
     const mark = `${backend.id}|${key}`;
+    const cached = this.#cache?.get(mark);
+    if (cached) {
+      // The checkpoint has it, and the catalog still lists it: fold it from there, read nothing.
+      this.#fold(cached.evidence, backend.id, cached.specs);
+      this.#folded.add(mark);
+      this.#failed.delete(mark);
+      return;
+    }
     try {
       let layer: ReportLayer | null;
       let id: string | undefined;
@@ -231,8 +287,10 @@ export class ReportIndex {
       }
       if (!id || !layer) throw new Error('an indexed layer is missing');
       const summary = layerSummary(layer);
-      this.#fold(layerEvidence(summary, backend.id), backend.id, summary.specs);
+      const evidence = layerEvidence(summary, backend.id);
+      this.#fold(evidence, backend.id, summary.specs);
       this.#folded.add(mark);
+      this.#writer?.add({ mark, evidence, specs: summary.specs });
       this.#failed.delete(mark);
       this.#refreshedAt ||= this.#now();
     } catch (error) {
