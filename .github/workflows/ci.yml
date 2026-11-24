@@ -150,8 +150,8 @@ jobs:
   example:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
-    # Browser/OS dependency downloads can consume five minutes before the example starts.
-    timeout-minutes: 10
+    # Slow package mirrors can take over ten minutes to install FFmpeg and browser dependencies.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
