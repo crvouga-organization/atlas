@@ -2,14 +2,14 @@
   "name": "atlas-server",
   "private": true,
   "type": "module",
-  "description": "The Atlas server on Vercel: the viewer and the API in one function, results in a private Vercel Blob store.",
+  "description": "The Atlas server on Vercel: a static viewer and one API function, results in a private Vercel Blob store.",
   "scripts": {
     "build": "atlas client build --no-data --out public --api-base /api"
   },
   "dependencies": {
-    "@crvouga/atlas": "^1.31.0"
+    "@crvouga/atlas": "1.33.0"
   },
   "engines": {
-    "node": ">=22"
+    "node": "22.x"
   }
 }

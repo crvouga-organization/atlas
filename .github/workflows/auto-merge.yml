@@ -1,0 +1,26 @@
+name: Enable PR auto-merge
+
+# Use the base branch workflow for forks. This job only reads event metadata.
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize, edited]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enroll:
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.auto_merge == null &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      (github.event.action != 'edited' || github.event.changes.base != null)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Enable auto-merge on the current revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gh pr merge "$PR_URL" --auto --squash --match-head-commit "$HEAD_SHA"

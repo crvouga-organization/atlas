@@ -6,13 +6,14 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { parse } from 'yaml';
 
 const root = path.resolve(import.meta.dir, '../../../examples/deploy/vercel');
 const read = (file: string) => readFileSync(path.join(root, file), 'utf8');
 const files = (dir: string): string[] => readdirSync(dir).flatMap(name => statSync(path.join(dir, name)).isDirectory() ? files(path.join(dir, name)) : [path.join(dir, name)]);
 
 describe('the Vercel template', () => {
-  const vercel = JSON.parse(read('vercel.json')) as { functions: Record<string, { includeFiles?: string; maxDuration?: number }>; rewrites: { source: string; destination: string }[]; crons: { path: string }[] };
+  const vercel = JSON.parse(read('vercel.json')) as { buildCommand: string; functions: Record<string, { includeFiles?: string; maxDuration?: number }>; rewrites: { source: string; destination: string }[]; crons: { path: string }[] };
   const pkg = JSON.parse(read('package.json')) as { dependencies: Record<string, string>; scripts: Record<string, string> };
 
   test('never ships ATLAS_INSECURE: a platform sign-in everyone passes is no reason to make everyone an admin', () => {
@@ -26,7 +27,19 @@ describe('the Vercel template', () => {
     expect(exported.publishConfig.exports['./server/serverless']).toBeDefined();
     expect(vercel.functions['api/atlas.ts']?.includeFiles).toBe('public/admin/**');
     expect(pkg.scripts.build).toBe('atlas client build --no-data --out public --api-base /api');
-    expect(pkg.dependencies['@crvouga/atlas']).toMatch(/^\^1\./);
+    expect(vercel.buildCommand).toBe('npm run build');
+    expect(pkg.dependencies['@crvouga/atlas']).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  test('the required deployment check runs for every pull request', () => {
+    const workflow = parse(read('.github/workflows/update.yml'));
+    const ruleset = JSON.parse(read('.github/rulesets/deployment.json'));
+    expect(workflow.on).toBe('pull_request');
+    expect(workflow.jobs.build.if).toBeUndefined();
+    expect(ruleset.rules[0].parameters.required_status_checks).toEqual([
+      { context: workflow.jobs.build.name, integration_id: 15368 }
+    ]);
+    expect(workflow.jobs.merge.needs).toBe('build');
   });
 
   test('every path reaches the function with the path it asked for, and the cron path is the scheduled pass', async () => {
@@ -67,7 +80,11 @@ test('the template build serves a deep link and its assets beside the Blob-backe
     cwd: dir, site: path.join(dir, 'public'), fetch: blob.fetch });
   const server = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch(request) {
     const url = new URL(request.url);
-    if (url.pathname.startsWith('/api/')) return instance()(request);
+    if (url.pathname.startsWith('/api/')) {
+      url.searchParams.set('__atlas_path', url.pathname);
+      url.pathname = '/api/atlas';
+      return instance()(new Request(url, request));
+    }
     const file = url.pathname.startsWith('/assets/') ? url.pathname : '/index.html';
     return new Response(Bun.file(path.join(dir, 'public', file)));
   } });

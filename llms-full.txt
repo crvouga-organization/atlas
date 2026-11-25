@@ -3602,7 +3602,7 @@ it:
 ```ts
 // api/atlas.ts: API, settings and health endpoints
 import { createAtlasHandler } from '@crvouga/atlas/server/serverless';
-const handle = createAtlasHandler();
+const handle = createAtlasHandler({ site: 'public' });
 export const GET = handle, HEAD = handle, POST = handle, PUT = handle, PATCH = handle, DELETE = handle, OPTIONS = handle;
 ```
 
@@ -3644,11 +3644,11 @@ multipart limits, operation quotas and SDK options, see [private storage consist
 [Blob SDK operations](https://vercel.com/docs/vercel-blob/using-blob-sdk) and [Blob usage limits](https://vercel.com/docs/vercel-blob/usage-and-pricing).
 - **Publishing from CI** needs no token: the template trusts the GitHub account it was deployed into ([trusted
   publishing](server.md#trusted-publishing)). On a protected production domain, pass the Vercel automation bypass secret in `ATLAS_HEADERS` as well.
-- **Updates are automatic.** Dependabot proposes each release and the template's workflow merges minor and patch ones;
-  Vercel redeploys on the merge.
-- **A configuration problem is a page.** Until storage and tokens are right, every request is answered with the
-  banner that names what to set. A deployment with neither tokens nor trusted publishers refuses to serve, so it is
-  never open to the world.
+- **Automatic updates** use the template’s daily Dependabot check. The GitHub workflow builds the exact proposed Atlas
+  version and smoke-tests the function on Node 22 before merging patch and minor updates. Vercel deploys the production
+  branch after the merge. See the [template setup](https://github.com/crvouga/atlas/blob/main/examples/deploy/vercel/README.md#3-updates) for repository settings.
+- **Readiness** is available at `/readyz`. A storage or authentication configuration problem returns HTTP 503 from the
+  function with the variables to check. Vercel serves the viewer shell separately from the CDN.
 
 The settings page at `/admin` works here too: `atlas client build` (the template's build step) prebuilds it into the
 site, so the function serves it without bundling anything at runtime.

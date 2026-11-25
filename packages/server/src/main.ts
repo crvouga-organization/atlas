@@ -50,12 +50,15 @@ export function openConfiguredBackends(config: ResolvedServerConfig, fetchImpl?:
 
 /** Can the server use the bucket? Said at the start, not at the first upload: list, write, read back and delete. */
 async function probeStorage(backend: BackendInput): Promise<string | null> {
-  const key = `layers/doctor-${Math.random().toString(36).slice(2, 10)}/probe`;
+  const key = `layers/doctor-${crypto.randomUUID()}/probe`;
   try {
-    await backend.store.listKeys('server/');
+    await backend.store.listKeys(key);
     await backend.store.put(key, new TextEncoder().encode('atlas'), 'text/plain');
-    if (!(await backend.store.head(key))) return 'an object was written but could not be found again';
-    await backend.store.delete(key);
+    try {
+      if (!(await backend.store.head(key))) return 'an object was written but could not be found again';
+    } finally {
+      await backend.store.delete(key);
+    }
     return null;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
